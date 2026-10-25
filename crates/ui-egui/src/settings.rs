@@ -1,7 +1,8 @@
 //! File > Settings (Ctrl+,): the window's own settings, the user's and never a project's. They live in
 //! `settings.json` beside the favorites and the update settings ([`beside`]), which the desktop's `main` hands the app
 //! ([`BimApp::use_settings`]); a window that wasn't given the file (every test's) keeps them for as long as it's open.
-//! What it keeps: the theme, interface language, ribbon, palettes, the window's size, and the background autosave interval.
+//! What it keeps: the theme, the layout, interface language, ribbon, palettes, the window's size, and the background autosave
+//! interval.
 //! The pages for what is still to come (performance and graphics) show what they will hold, greyed out.
 
 use std::path::{Path, PathBuf};
@@ -68,6 +69,8 @@ pub fn window_in(path: &Path) -> Option<Window> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub theme: ThemePreference,
+    /// The Compact layout: the bars and palettes flush to the window's edges, not floating cards.
+    pub compact: bool,
     pub language: Lang,
     pub ribbon_minimized: bool,
     pub docking: Docking,
@@ -86,6 +89,7 @@ impl Settings {
         };
         json!({
             "theme": theme,
+            "layout": if self.compact { "compact" } else { "floating" },
             "language": self.language.code(),
             "ribbon_minimized": self.ribbon_minimized,
             "palettes": self.docking.to_json(),
@@ -106,6 +110,11 @@ impl Settings {
         };
         Settings {
             theme,
+            compact: match v["layout"].as_str() {
+                Some("compact") => true,
+                Some("floating") => false,
+                _ => base.compact,
+            },
             language: v["language"].as_str().and_then(Lang::from_code).unwrap_or(base.language),
             ribbon_minimized: v["ribbon_minimized"].as_bool().unwrap_or(base.ribbon_minimized),
             docking: if v["palettes"].is_object() { Docking::from_json(&v["palettes"]) } else { base.docking },
@@ -179,6 +188,7 @@ impl BimApp {
         let now = self.settings_now(ThemePreference::System);
         let kept = read(&path).map_or(now.clone(), |v| Settings::from_json(&v, now));
         (self.lang, self.ribbon_min, self.docking) = (kept.language, kept.ribbon_minimized, kept.docking.clone());
+        self.compact = kept.compact;
         self.theme_wanted = Some(kept.theme);
         self.autosave.interval_minutes = kept.autosave_minutes;
         self.card.wanted = kept.gpu_3d;
@@ -195,6 +205,7 @@ impl BimApp {
     fn settings_now(&self, theme: ThemePreference) -> Settings {
         Settings {
             theme,
+            compact: self.compact,
             language: self.lang,
             ribbon_minimized: self.ribbon_min,
             docking: self.docking.clone(),
@@ -267,6 +278,13 @@ impl BimApp {
         if theme != before {
             ctx.set_theme(theme);
         }
+        heading(ui, "Layout");
+        ui.horizontal(|ui| {
+            let tip = "The ribbon, the palettes and the bars as cards floating over the view";
+            ui.radio_value(&mut self.compact, false, t("Floating")).on_hover_text(t(tip));
+            let tip = "The ribbon, the palettes and the bars flush to the window's edges";
+            ui.radio_value(&mut self.compact, true, t("Compact")).on_hover_text(t(tip));
+        });
         heading(ui, "Language");
         ComboBox::from_id_salt("settings-language").selected_text(self.lang.label()).width(200.0).show_ui(ui, |ui| {
             for l in Lang::ALL {

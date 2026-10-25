@@ -2329,6 +2329,9 @@ option {"set": "Studies", "options": ["Tall", "Low"]}
 mass {"boundary": [[1000, 1000], [3000, 1000], [3000, 2000], [1000, 2000]], "name": "Block A"}"#;
     let mut h =
         app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}\n{extra}"));
+    // Wide enough for every tab's tools in the longest language: a narrower window hands some over to their panel's list.
+    h.set_size(vec2(1800.0, 900.0));
+    h.run();
     // The probe finds what it looks for: in English, the same labels are all English.
     assert!(english(&h, Lang::Spanish).contains(&"Architecture".to_string()));
     for l in [Lang::Portuguese, Lang::Spanish, Lang::Chinese] {
@@ -2986,7 +2989,9 @@ fn changing_a_schedule_every_project_has_makes_it_the_projects() {
     let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\ndoor {{\"at\": [6000, 0], \"type\": \"Single 800 x 2100\"}}"));
     browse(&mut h, "Door Schedule");
     assert!(ids(&h, "schedule").is_empty(), "opened, it's still every project's");
-    press(&mut h, "Edit Sorting/Grouping");
+    // Low in Properties, it may lie below the palette's fold: pressed as a screen reader does.
+    h.get_by_label("Edit Sorting/Grouping").click_accesskit();
+    h.run();
     press(&mut h, "Add Sort");
     pick(&mut h, Role::CheckBox, "Itemize every instance");
     press(&mut h, "Close");
@@ -4149,20 +4154,51 @@ fn ph_and_do_open_phasing_and_design_options_and_so_do_the_manage_tabs_buttons()
 }
 
 #[test]
-fn a_ribbon_tab_wider_than_the_window_scrolls_sideways_and_each_tab_keeps_its_place() {
+fn a_ribbon_tab_wider_than_the_window_folds_its_last_panels_to_buttons_that_list_their_tools() {
     let mut h = app(BOX);
+    h.set_size(vec2(1000.0, 800.0));
+    h.run();
     let window = h.ctx.content_rect().right();
-    let ribbon =
-        |h: &Harness<BimApp>, name: &str| h.get_all_by_label(name).map(|n| n.rect()).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
     press(&mut h, "Manage");
-    assert!(ribbon(&h, "Design Options").right() > window, "the Manage tab is wider than a window of {window}");
+    assert!(h.query_by_label("Design Options").is_none(), "the last panel is folded at {window}");
+    assert!(h.get_by_label("Design Options ▾").rect().right() <= window, "to one button, in the window");
+    assert!(h.get_by_label("Materials").rect().left() >= 0.0, "and the first panel is as it was");
+    // The folded panel lists its tools, and a tool there works as on the ribbon.
+    press(&mut h, "Design Options ▾");
+    press(&mut h, "Design Options");
+    assert!(h.query_by_label("Option set:").is_some());
+}
+
+#[test]
+fn a_panels_name_lists_its_tools() {
+    let mut h = app(BOX);
+    press(&mut h, "Build ▾");
+    let lowest =
+        |h: &Harness<BimApp>, name: &str| h.get_all_by_label(name).map(|n| n.rect().center()).max_by(|a, b| a.y.total_cmp(&b.y)).unwrap();
+    // The list under the name, with the ribbon's own button above it.
+    assert_eq!(h.get_all_by_label("Wall").count(), 2);
+    let row = lowest(&h, "Wall");
+    click_at(&mut h, row);
+    assert!(matches!(h.state().tool, Tool::Wall(_)));
+    // Its contextual tab has the ribbon now, and the list has closed.
+    assert_eq!(h.query_all_by_label("Wall").count(), 0);
+}
+
+#[test]
+fn a_ribbon_tab_too_wide_even_folded_scrolls_sideways_and_each_tab_keeps_its_place() {
+    let mut h = app(BOX);
+    h.set_size(vec2(520.0, 800.0));
+    h.run();
+    let window = h.ctx.content_rect().right();
+    assert!(h.get_by_label("Datum ▾").rect().right() > window, "folded, Architecture is still wider than {window}");
     scroll_ribbon_right(&mut h);
-    assert!(ribbon(&h, "Design Options").right() <= window, "at its end the last button is in the window");
-    assert!(ribbon(&h, "Materials").left() < 0.0, "and the first has gone out on the left");
-    press(&mut h, "Architecture");
-    assert!(ribbon(&h, "Wall").left() >= 0.0, "another tab starts at its left");
-    press(&mut h, "Manage");
-    assert!(ribbon(&h, "Design Options").right() <= window, "and Manage is where it was left");
+    assert!(h.get_by_label("Datum ▾").rect().right() <= window, "at its end the last panel is in the window");
+    // The tabs past the window's edge are out of reach at this size.
+    h.state_mut().tab = crate::Tab::Manage;
+    h.run();
+    h.state_mut().tab = crate::Tab::Architecture;
+    h.run();
+    assert!(h.get_by_label("Datum ▾").rect().right() <= window, "and Architecture is where it was left");
 }
 
 #[test]
@@ -4871,6 +4907,7 @@ mod dock;
 mod gpu;
 mod lineweights;
 mod links;
+mod look;
 mod mep;
 mod objectstyles;
 mod planviews;

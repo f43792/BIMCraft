@@ -2432,6 +2432,19 @@ const WORDS: &[[&str; 3]] = &[
     ["As the System", "Como o sistema", "Como el sistema"],
     ["Light", "Claro", "Claro"],
     ["Dark", "Escuro", "Oscuro"],
+    ["Layout", "Disposição", "Disposición"],
+    ["Floating", "Flutuante", "Flotante"],
+    ["Compact", "Compacta", "Compacta"],
+    [
+        "The ribbon, the palettes and the bars as cards floating over the view",
+        "A faixa de opções, as paletas e as barras como cartões flutuando sobre a vista",
+        "La cinta de opciones, las paletas y las barras como tarjetas flotando sobre la vista",
+    ],
+    [
+        "The ribbon, the palettes and the bars flush to the window's edges",
+        "A faixa de opções, as paletas e as barras rentes às bordas da janela",
+        "La cinta de opciones, las paletas y las barras pegadas a los bordes de la ventana",
+    ],
     ["Ribbon", "Faixa de opções", "Cinta de opciones"],
     ["Minimize the ribbon to its tabs", "Minimizar a faixa de opções às abas", "Minimizar la cinta de opciones a sus pestañas"],
     [
