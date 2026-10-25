@@ -101,7 +101,7 @@ fn units_spacing_and_files_it_cant_take() {
     for (p, says) in [
         (json!({"path": feet, "units": "furlong", "name": "f2"}), "mm, cm, m, in, ft"),
         (json!({"path": feet, "spacing": -1, "name": "f3"}), "spacing"),
-        (json!({"path": scan("units", "plan.dwg", "x")}), "PTS, XYZ, PLY or LAS"),
+        (json!({"path": scan("units", "plan.dwg", "x")}), "PTS, XYZ, PLY, LAS or E57"),
         (json!({"path": scan("units", "scan.laz", "x")}), "LAZ"),
         (json!({"path": scan("units", "gone", "x").replace("gone", "not-there.xyz")}), "not-there.xyz"),
         (json!({"path": scan("units", "bad.xyz", "0 0 zero\n")}), "line 1"),

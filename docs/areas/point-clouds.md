@@ -5,11 +5,22 @@ plans snap to them, and the desktop brings them in (Insert > Point Cloud). IFC l
 no point cloud, and `ifc_leaves_scans_out_as_revit_does` keeps the file what it was without them.
 
 Point clouds (`cloud.rs`) come from public specifications: PTS and XYZ text, PLY (text or either byte order) and ASPRS LAS 1.0
-to 1.4 uncompressed (`Format::from_extension` says why LAZ, E57 and ReCap's RCP/RCS don't). `cloud::read` parses a file twice,
+to 1.4 uncompressed, and ASTM E57 (`Format::from_extension` says why LAZ and ReCap's RCP/RCS don't). `cloud::read` parses a file twice,
 once to measure it (`Stats`: the count, the bounds, the ranges of intensity and colour) and once to keep it: every `stride`th
 point so `Options::cap` is never passed, then one in each cube of `spacing`, the same every time. A `Scan` keeps its points as
 `f32` about `origin`, the middle of its bounds, so a survey's coordinates far off keep their millimetres within `MAX_SPAN`;
 colour comes in eight bits whether the file has eight, sixteen or nought to one, and intensity alone is grey.
+
+E57 (ASTM E2807, `cloud/e57.rs`) is read from the standard with no library: the 48-byte header, pages of 1024 bytes whose last
+four are a CRC-32C (`Paged` reads the 1020 logical bytes of each; the checksums aren't checked, so a page that lies reads as
+points that lie, never a crash), and the XML section, read by a small parser of its own (elements, attributes, text, CDATA;
+capped in depth and size). Every `data3D` scan comes in, placed by its `pose` (a quaternion and a translation), as one `Scan`
+whose `read` is the sum of their `recordCount`s. Each scan's points are a CompressedVector: a section header, then data packets
+whose bytestreams, one for each field of the `prototype`, are bit-packed and run on from packet to packet; `Pack` decodes
+Float (single or double), Integer and ScaledInteger, and only bit-packing, the one codec E57 writes, is read. Cartesian or
+spherical coordinates both come in, a point marked invalid doesn't, and colour is scaled from `colorLimits` (or its field's
+range) to eight bits. `images2D` is passed over. The tests write E57 files of their own (`e57` in the module's tests), with
+values that cross packets and pages; the reference survey's 177 MB file reads its 6.6 million points in under two seconds.
 
 A project holds each scan once, by name, as a `Cloud` in `Model::clouds` (a library entry of kind `Cloud`, so it has an id and a
 GUID): its points and colours shared behind an `Arc`, the file it came from, and where its middle was there. A project file holds

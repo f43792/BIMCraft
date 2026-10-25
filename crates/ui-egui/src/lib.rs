@@ -2788,7 +2788,7 @@ impl BimApp {
             if big_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
                 self.link_dialog = true;
             }
-            let tip = "Point Cloud: laser scans (PTS, XYZ, PLY or LAS) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to";
+            let tip = "Point Cloud: laser scans (PTS, XYZ, PLY, LAS or E57) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to";
             if big_button(ui, Icon::PointCloud, "Point Cloud", self.cloud_box.is_some(), tip).clicked() {
                 self.cloud_dialog = true;
             }

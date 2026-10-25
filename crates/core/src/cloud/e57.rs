@@ -1,0 +1,804 @@
+//! E57 (ASTM E2807): the vendor-neutral file scanners export. A file is pages of 1024 bytes, each ending in a checksum;
+//! an XML section says what it holds, and each scan (`data3D`) keeps its points in a binary section of packets, each
+//! field bit-packed in a stream of its own. Read from the public standard; every scan in a file comes in, placed by
+//! its pose. The checksums aren't checked: a page that lies reads as points that lie, never as a crash.
+
+use super::Raw;
+
+/// Bytes in a page, and of them, the ones that hold data (the last four are its checksum).
+const PAGE: u64 = 1024;
+const DATA: u64 = PAGE - 4;
+/// How deep the XML may nest, and how many elements it may hold.
+const MAX_DEPTH: usize = 64;
+const MAX_NODES: usize = 1 << 20;
+
+/// Hands each point of every scan in an E57 file to `f`, in metres where the file put it.
+pub(super) fn read(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    if !bytes.starts_with(b"ASTM-E57") {
+        return Err("it isn't an E57 file: it doesn't start with ASTM-E57".into());
+    }
+    let short = || "its header is cut short".to_string();
+    let u32_at = |i: usize| bytes.get(i..i + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes).ok_or_else(short);
+    let u64_at = |i: usize| bytes.get(i..i + 8).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes).ok_or_else(short);
+    let major = u32_at(8)?;
+    if major != 1 {
+        return Err(format!("it's E57 version {major}; BIMCraft reads version 1"));
+    }
+    let page = u64_at(40)?;
+    if page != PAGE {
+        return Err(format!("its pages are {page} bytes; E57's are {PAGE}"));
+    }
+    let file = Paged { bytes };
+    let (xml_at, xml_len) = (u64_at(24)?, u64_at(32)?);
+    let xml_len = usize::try_from(xml_len).ok().filter(|&n| n <= bytes.len()).ok_or("its XML is longer than the file")?;
+    let mut xml = Vec::new();
+    file.take(file.logical(xml_at)?, xml_len, &mut xml)?;
+    let root = parse(&String::from_utf8_lossy(&xml))?;
+    let Some(data3d) = root.child("data3D") else { return Err("it holds no scans (no data3D)".into()) };
+    for (i, scan) in data3d.children.iter().enumerate() {
+        scan_points(&file, scan, f).map_err(|e| format!("scan {}: {e}", i + 1))?;
+    }
+    Ok(())
+}
+
+/// The file as E57 lays it out: logical bytes, 1020 to each page of 1024.
+struct Paged<'a> {
+    bytes: &'a [u8],
+}
+
+impl Paged<'_> {
+    /// The logical place of a physical offset, which mustn't fall on a checksum.
+    fn logical(&self, physical: u64) -> Result<u64, String> {
+        if physical % PAGE >= DATA {
+            return Err(format!("offset {physical} falls on a page's checksum"));
+        }
+        Ok(physical / PAGE * DATA + physical % PAGE)
+    }
+
+    /// Appends `n` logical bytes from logical place `at`.
+    fn take(&self, mut at: u64, mut n: usize, out: &mut Vec<u8>) -> Result<(), String> {
+        while n > 0 {
+            let in_page = at % DATA;
+            let physical = at / DATA * PAGE + in_page;
+            let here = usize::try_from((DATA - in_page).min(n as u64)).unwrap_or(n);
+            let from = usize::try_from(physical).map_err(|_| "an offset past the file".to_string())?;
+            let part = from
+                .checked_add(here)
+                .and_then(|end| self.bytes.get(from..end))
+                .ok_or_else(|| format!("it's cut short: byte {physical} is past its {} bytes", self.bytes.len()))?;
+            out.extend_from_slice(part);
+            at += here as u64;
+            n -= here;
+        }
+        Ok(())
+    }
+}
+
+/// An element of the XML: its name, its attributes, what it holds.
+#[derive(Default)]
+struct Node {
+    name: String,
+    attrs: Vec<(String, String)>,
+    children: Vec<Node>,
+    text: String,
+}
+
+impl Node {
+    fn child(&self, name: &str) -> Option<&Node> {
+        self.children.iter().find(|c| c.name == name)
+    }
+
+    fn attr(&self, name: &str) -> Option<&str> {
+        self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// A number its attribute `name` holds, or `default` when it hasn't one.
+    fn number(&self, name: &str, default: f64) -> Result<f64, String> {
+        match self.attr(name) {
+            None => Ok(default),
+            Some(v) => v.trim().parse().map_err(|_| format!("<{}>'s {name} isn't a number: {v}", self.name)),
+        }
+    }
+
+    fn integer(&self, name: &str, default: i64) -> Result<i64, String> {
+        match self.attr(name) {
+            None => Ok(default),
+            Some(v) => v.trim().parse().map_err(|_| format!("<{}>'s {name} isn't an integer: {v}", self.name)),
+        }
+    }
+
+    /// The number a child element holds, as `<w type="Float">1</w>`.
+    fn value(&self, name: &str) -> Option<f64> {
+        self.child(name).and_then(|c| c.text.trim().parse().ok())
+    }
+}
+
+/// A small XML reader, enough for E57's: elements, attributes, text and CDATA; declarations and comments are passed over.
+fn parse(s: &str) -> Result<Node, String> {
+    let bad = |what: &str| format!("its XML is broken: {what}");
+    let mut stack: Vec<Node> = vec![Node::default()];
+    let mut nodes = 0;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let Some(open) = rest.find('<') else {
+            if let Some(top) = stack.last_mut() {
+                top.text.push_str(&unescape(rest));
+            }
+            break;
+        };
+        if let Some(top) = stack.last_mut() {
+            top.text.push_str(&unescape(&rest[..open]));
+        }
+        rest = &rest[open..];
+        if let Some(r) = rest.strip_prefix("<![CDATA[") {
+            let end = r.find("]]>").ok_or_else(|| bad("a CDATA isn't closed"))?;
+            if let Some(top) = stack.last_mut() {
+                top.text.push_str(&r[..end]);
+            }
+            rest = &r[end + 3..];
+        } else if let Some(r) = rest.strip_prefix("<!--") {
+            let end = r.find("-->").ok_or_else(|| bad("a comment isn't closed"))?;
+            rest = &r[end + 3..];
+        } else if rest.starts_with("<?") || rest.starts_with("<!") {
+            let end = rest.find('>').ok_or_else(|| bad("a declaration isn't closed"))?;
+            rest = &rest[end + 1..];
+        } else if let Some(r) = rest.strip_prefix("</") {
+            let end = r.find('>').ok_or_else(|| bad("an end tag isn't closed"))?;
+            let name = r[..end].trim();
+            let node = stack.pop().filter(|_| !stack.is_empty()).ok_or_else(|| bad(&format!("</{name}> closes nothing")))?;
+            if node.name != name {
+                return Err(bad(&format!("<{}> is closed by </{name}>", node.name)));
+            }
+            if let Some(parent) = stack.last_mut() {
+                parent.children.push(node);
+            }
+            rest = &r[end + 1..];
+        } else {
+            let r = &rest[1..];
+            let end = tag_end(r).ok_or_else(|| bad("a tag isn't closed"))?;
+            let (tag, empty) = match r[..end].strip_suffix('/') {
+                Some(t) => (t, true),
+                None => (&r[..end], false),
+            };
+            nodes += 1;
+            if nodes > MAX_NODES {
+                return Err(format!("its XML holds more than {MAX_NODES} elements"));
+            }
+            let node = element(tag).ok_or_else(|| bad(&format!("<{tag}>")))?;
+            if empty {
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(node);
+                }
+            } else {
+                if stack.len() > MAX_DEPTH {
+                    return Err(format!("its XML nests deeper than {MAX_DEPTH}"));
+                }
+                stack.push(node);
+            }
+            rest = &r[end + 1..];
+        }
+    }
+    let [top] = <[Node; 1]>::try_from(stack).map_err(|s| bad(&format!("<{}> isn't closed", s.last().map_or("", |n| n.name.as_str()))))?;
+    top.children.into_iter().next().ok_or_else(|| bad("it has no root element"))
+}
+
+/// Where a tag ends: its `>`, outside quotes.
+fn tag_end(s: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, c) in s.char_indices() {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, '>') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// An element from its tag: a name, then `key="value"` pairs.
+fn element(tag: &str) -> Option<Node> {
+    let tag = tag.trim();
+    let name_end = tag.find(char::is_whitespace).unwrap_or(tag.len());
+    let name = &tag[..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    let mut node = Node { name: name.to_string(), ..Node::default() };
+    let mut rest = tag[name_end..].trim_start();
+    while !rest.is_empty() {
+        let eq = rest.find('=')?;
+        let key = rest[..eq].trim();
+        let after = rest[eq + 1..].trim_start();
+        let q = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        let close = after[1..].find(q)?;
+        node.attrs.push((key.to_string(), unescape(&after[1..1 + close])));
+        rest = after[close + 2..].trim_start();
+    }
+    Some(node)
+}
+
+fn unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+}
+
+/// How a field's values are packed.
+#[derive(Clone, Copy, Debug)]
+enum Pack {
+    /// IEEE floats, 32 or 64 bits.
+    Float { double: bool },
+    /// An integer of `bits` bits above `min`, times `scale`, plus `offset` (1 and 0 for a plain Integer).
+    Int { min: i64, max: i64, bits: u32, scale: f64, offset: f64 },
+}
+
+impl Pack {
+    fn of(node: &Node) -> Result<Pack, String> {
+        let int = |scale: f64, offset: f64| -> Result<Pack, String> {
+            let (min, max) = (node.integer("minimum", i64::MIN)?, node.integer("maximum", i64::MAX)?);
+            if max < min {
+                return Err(format!("<{}>'s maximum {max} is under its minimum {min}", node.name));
+            }
+            // Bits enough for every value from the minimum to the maximum.
+            let range = max.abs_diff(min);
+            Ok(Pack::Int { min, max, bits: u64::BITS - range.leading_zeros(), scale, offset })
+        };
+        match node.attr("type") {
+            Some("Float") => Ok(Pack::Float { double: node.attr("precision") != Some("single") }),
+            Some("Integer") => int(1.0, 0.0),
+            Some("ScaledInteger") => {
+                let (scale, offset) = (node.number("scale", 1.0)?, node.number("offset", 0.0)?);
+                if !(scale.is_finite() && scale != 0.0 && offset.is_finite()) {
+                    return Err(format!("<{}>'s scale {scale} and offset {offset} aren't usable", node.name));
+                }
+                int(scale, offset)
+            }
+            t => Err(format!("its field <{}> is a {}, which BIMCraft doesn't read", node.name, t.unwrap_or("thing of no type"))),
+        }
+    }
+
+    fn bits(self) -> u32 {
+        match self {
+            Pack::Float { double } => {
+                if double {
+                    64
+                } else {
+                    32
+                }
+            }
+            Pack::Int { bits, .. } => bits,
+        }
+    }
+
+    fn decode(self, raw: u64) -> f64 {
+        match self {
+            Pack::Float { double: true } => f64::from_bits(raw),
+            Pack::Float { double: false } => f64::from(f32::from_bits(raw as u32)),
+            Pack::Int { min, scale, offset, .. } => (min as i128 + raw as i128) as f64 * scale + offset,
+        }
+    }
+}
+
+/// One field's stream: its bytes not yet read and where in them the next value starts.
+struct Stream {
+    pack: Pack,
+    bytes: Vec<u8>,
+    bit: usize,
+}
+
+impl Stream {
+    /// The next value, if all its bits have come.
+    fn next(&mut self) -> Option<f64> {
+        let bits = self.pack.bits() as usize;
+        if bits == 0 {
+            return Some(self.pack.decode(0));
+        }
+        if self.bit + bits > self.bytes.len() * 8 {
+            return None;
+        }
+        let first = self.bit / 8;
+        let mut word = [0u8; 16];
+        let take = (self.bytes.len() - first).min(16);
+        word[..take].copy_from_slice(&self.bytes[first..first + take]);
+        let all = u128::from_le_bytes(word) >> (self.bit % 8);
+        let raw = if bits == 64 { all as u64 } else { (all as u64) & ((1u64 << bits) - 1) };
+        self.bit += bits;
+        Some(self.pack.decode(raw))
+    }
+
+    /// Takes a packet's bytes after what's left of the last.
+    fn feed(&mut self, more: &[u8]) {
+        self.bytes.drain(..self.bit / 8);
+        self.bit %= 8;
+        self.bytes.extend_from_slice(more);
+    }
+}
+
+/// Which stream holds what a point is made of.
+#[derive(Default)]
+struct Fields {
+    cartesian: Option<[usize; 3]>,
+    spherical: Option<[usize; 3]>,
+    invalid: Option<usize>,
+    intensity: Option<usize>,
+    rgb: Option<[usize; 3]>,
+}
+
+fn scan_points(file: &Paged, scan: &Node, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    let points = scan.child("points").ok_or("it has no points")?;
+    if points.attr("type") != Some("CompressedVector") {
+        return Err("its points aren't a CompressedVector".into());
+    }
+    if points.child("codecs").is_some_and(|c| !c.children.is_empty()) {
+        return Err("its points are packed by a codec BIMCraft doesn't know; E57 writes bit-packed ones".into());
+    }
+    let count = u64::try_from(points.integer("recordCount", -1)?).map_err(|_| "it doesn't say how many points it has")?;
+    let at = u64::try_from(points.integer("fileOffset", -1)?).map_err(|_| "it doesn't say where its points are")?;
+    let prototype = points.child("prototype").ok_or("its points have no prototype")?;
+    let mut streams = Vec::new();
+    let mut names = Vec::new();
+    for field in &prototype.children {
+        streams.push(Stream { pack: Pack::of(field)?, bytes: Vec::new(), bit: 0 });
+        names.push(field.name.as_str());
+    }
+    let find = |n: &str| names.iter().position(|m| *m == n);
+    let three = |a, b, c| Some([find(a)?, find(b)?, find(c)?]);
+    let cartesian = three("cartesianX", "cartesianY", "cartesianZ");
+    let fields = Fields {
+        cartesian,
+        spherical: three("sphericalRange", "sphericalAzimuth", "sphericalElevation"),
+        invalid: find(if cartesian.is_some() { "cartesianInvalidState" } else { "sphericalInvalidState" }),
+        intensity: find("intensity"),
+        rgb: three("colorRed", "colorGreen", "colorBlue"),
+    };
+    if fields.cartesian.is_none() && fields.spherical.is_none() {
+        return Err("its points have neither cartesian nor spherical coordinates".into());
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    if streams.iter().all(|s| s.pack.bits() == 0) {
+        return Err("its points hold no data".into());
+    }
+    let pose = Pose::of(scan)?;
+    let colour = Colour::of(scan, &streams, fields.rgb);
+
+    // The section's header, then its packets from the first data packet on.
+    let start = file.logical(at)?;
+    let mut head = Vec::new();
+    file.take(start, 32, &mut head)?;
+    let word = |i: usize| head.get(i..i + 8).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes).unwrap_or(0);
+    if head.first() != Some(&1) {
+        return Err(format!("its points at offset {at} aren't a compressed vector section"));
+    }
+    let end = start.saturating_add(word(8));
+    let mut next = file.logical(word(16))?;
+    let mut left = count;
+    let mut packet = Vec::new();
+    let mut values = vec![0.0; streams.len()];
+    while left > 0 {
+        if next >= end {
+            return Err(format!("it's cut short: {left} of its {count} points are missing"));
+        }
+        packet.clear();
+        file.take(next, 4, &mut packet)?;
+        let length = u64::from(u16::from_le_bytes([packet[2], packet[3]])) + 1;
+        match packet[0] {
+            1 => {
+                file.take(next + 4, usize::try_from(length).unwrap_or(0).saturating_sub(4), &mut packet)?;
+                feed(&packet, &mut streams)?;
+                // Every point whose fields have all come.
+                while left > 0 && pull(&mut streams, &mut values) {
+                    left -= 1;
+                    if let Some(raw) = point(&values, &fields, &pose, &colour) {
+                        f(raw)?;
+                    }
+                }
+            }
+            0 | 2 => {}
+            t => return Err(format!("a packet of type {t}, which E57 doesn't have")),
+        }
+        next += length;
+    }
+    Ok(())
+}
+
+/// Hands a data packet's buffers to their streams.
+fn feed(packet: &[u8], streams: &mut [Stream]) -> Result<(), String> {
+    let u16_at = |i: usize| packet.get(i..i + 2).map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])));
+    let short = || "a data packet is cut short".to_string();
+    let n = u16_at(4).ok_or_else(short)?;
+    if n != streams.len() {
+        return Err(format!("a data packet has {n} streams; its prototype has {}", streams.len()));
+    }
+    let mut at = 6 + 2 * n;
+    for (k, s) in streams.iter_mut().enumerate() {
+        let len = u16_at(6 + 2 * k).ok_or_else(short)?;
+        s.feed(packet.get(at..at + len).ok_or_else(short)?);
+        at += len;
+    }
+    Ok(())
+}
+
+/// The next point's values, one from each stream, if each has one; none is taken unless all have.
+fn pull(streams: &mut [Stream], values: &mut [f64]) -> bool {
+    let ready = streams.iter().all(|s| s.pack.bits() == 0 || s.bit + s.pack.bits() as usize <= s.bytes.len() * 8);
+    if !ready {
+        return false;
+    }
+    for (s, v) in streams.iter_mut().zip(values.iter_mut()) {
+        *v = s.next().unwrap_or(f64::NAN);
+    }
+    true
+}
+
+fn point(v: &[f64], fields: &Fields, pose: &Pose, colour: &Colour) -> Option<Raw> {
+    // 1: a direction with no range; 2: no point at all.
+    if fields.invalid.is_some_and(|i| v[i] != 0.0) {
+        return None;
+    }
+    let p = match (fields.cartesian, fields.spherical) {
+        (Some([x, y, z]), _) => [v[x], v[y], v[z]],
+        (None, Some([r, az, el])) => {
+            let (r, az, el) = (v[r], v[az], v[el]);
+            [r * el.cos() * az.cos(), r * el.cos() * az.sin(), r * el.sin()]
+        }
+        (None, None) => return None,
+    };
+    Some(Raw { p: pose.apply(p), intensity: fields.intensity.map(|i| v[i]), rgb: fields.rgb.map(|c| colour.of_values(c.map(|k| v[k]))) })
+}
+
+/// Where a scan's own coordinates sit in the file's: a rotation, then a translation.
+struct Pose {
+    m: [[f64; 3]; 3],
+    t: [f64; 3],
+}
+
+impl Pose {
+    fn of(scan: &Node) -> Result<Pose, String> {
+        let mut pose = Pose { m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] };
+        let Some(node) = scan.child("pose") else { return Ok(pose) };
+        if let Some(r) = node.child("rotation") {
+            let q = ["w", "x", "y", "z"].map(|k| r.value(k).unwrap_or(0.0));
+            let n = q.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if !(n.is_finite() && n > 1e-9) {
+                return Err("its pose's rotation isn't a rotation".into());
+            }
+            let [w, x, y, z] = q.map(|v| v / n);
+            pose.m = [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+                [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+                [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+            ];
+        }
+        if let Some(t) = node.child("translation") {
+            pose.t = ["x", "y", "z"].map(|k| t.value(k).unwrap_or(0.0));
+            if pose.t.iter().any(|v| !v.is_finite()) {
+                return Err("its pose's translation isn't a place".into());
+            }
+        }
+        Ok(pose)
+    }
+
+    fn apply(&self, p: [f64; 3]) -> [f64; 3] {
+        [0, 1, 2].map(|i| self.m[i][0] * p[0] + self.m[i][1] * p[1] + self.m[i][2] * p[2] + self.t[i])
+    }
+}
+
+/// A scan's colours to eight bits, from the range its `colorLimits` (or else its fields) give.
+struct Colour {
+    lo: [f64; 3],
+    hi: [f64; 3],
+}
+
+impl Colour {
+    fn of(scan: &Node, streams: &[Stream], rgb: Option<[usize; 3]>) -> Colour {
+        let mut c = Colour { lo: [0.0; 3], hi: [255.0; 3] };
+        let limits = scan.child("colorLimits");
+        for (k, name) in ["Red", "Green", "Blue"].iter().enumerate() {
+            let given = limits.and_then(|l| Some((l.value(&format!("color{name}Minimum"))?, l.value(&format!("color{name}Maximum"))?)));
+            let field = rgb.and_then(|r| streams.get(r[k])).and_then(|s| match s.pack {
+                Pack::Int { min, max, scale, offset, .. } => Some((min as f64 * scale + offset, max as f64 * scale + offset)),
+                _ => None,
+            });
+            if let Some((lo, hi)) = given.or(field).filter(|(lo, hi)| hi > lo) {
+                (c.lo[k], c.hi[k]) = (lo, hi);
+            }
+        }
+        c
+    }
+
+    fn of_values(&self, v: [f64; 3]) -> [f64; 3] {
+        [0, 1, 2].map(|k| ((v[k] - self.lo[k]) / (self.hi[k] - self.lo[k]) * 255.0).round())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Format, Options, Scan, read as read_cloud};
+    use super::*;
+
+    /// A field as a test writes it: its name, how it's packed, and its values.
+    #[derive(Clone)]
+    struct Field {
+        xml: String,
+        pack: Pack,
+        values: Vec<f64>,
+    }
+
+    fn float(name: &str, single: bool, values: &[f64]) -> Field {
+        let xml = format!("<{name} type=\"Float\"{}/>", if single { " precision=\"single\"" } else { "" });
+        Field { xml, pack: Pack::Float { double: !single }, values: values.to_vec() }
+    }
+
+    fn integer(name: &str, min: i64, max: i64, values: &[f64]) -> Field {
+        scaled(name, min, max, 1.0, 0.0, values)
+    }
+
+    fn scaled(name: &str, min: i64, max: i64, scale: f64, offset: f64, values: &[f64]) -> Field {
+        let plain = scale == 1.0 && offset == 0.0;
+        let kind = if plain { "Integer" } else { "ScaledInteger" };
+        let more = if plain { String::new() } else { format!(" scale=\"{scale}\" offset=\"{offset}\"") };
+        let xml = format!("<{name} type=\"{kind}\" minimum=\"{min}\" maximum=\"{max}\"{more}>0</{name}>");
+        let bits = u64::BITS - max.abs_diff(min).leading_zeros();
+        Field { xml, pack: Pack::Int { min, max, bits, scale, offset }, values: values.to_vec() }
+    }
+
+    /// A scan as a test writes it: its fields, and what more its XML says (a pose, colour limits).
+    struct Scan57 {
+        fields: Vec<Field>,
+        more: String,
+    }
+
+    fn cartesian(points: &[[f64; 3]]) -> Vec<Field> {
+        ["cartesianX", "cartesianY", "cartesianZ"]
+            .iter()
+            .enumerate()
+            .map(|(k, n)| float(n, true, &points.iter().map(|p| p[k]).collect::<Vec<_>>()))
+            .collect()
+    }
+
+    /// The bits of a field's values, packed from the least significant up.
+    fn stream(f: &Field) -> Vec<u8> {
+        let (mut out, mut acc, mut n) = (Vec::new(), 0u128, 0u32);
+        for &v in &f.values {
+            let raw: u64 = match f.pack {
+                Pack::Float { double: true } => v.to_bits(),
+                Pack::Float { double: false } => u64::from((v as f32).to_bits()),
+                Pack::Int { min, scale, offset, .. } => (((v - offset) / scale).round() as i64 - min) as u64,
+            };
+            acc |= u128::from(raw) << n;
+            n += f.pack.bits();
+            while n >= 8 {
+                out.push(acc as u8);
+                acc >>= 8;
+                n -= 8;
+            }
+        }
+        if n > 0 {
+            out.push(acc as u8);
+        }
+        out
+    }
+
+    fn physical(logical: u64) -> u64 {
+        logical / DATA * PAGE + logical % DATA
+    }
+
+    /// An E57 file of these scans: the header, each scan's section of packets (each stream cut at its own size, so
+    /// values cross packets, with an empty packet among them), then the XML; laid in pages, checksums left nought.
+    fn e57(scans: &[Scan57]) -> Vec<u8> {
+        let mut logical = vec![0u8; 48];
+        let mut xml = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- written by a test -->\n\
+             <e57Root type=\"Structure\" xmlns=\"http://www.astm.org/COMMIT/E57/2010-e57-v1.0\">\n\
+             <formatName type=\"String\"><![CDATA[ASTM E57 3D Imaging Data File]]></formatName>\n\
+             <data3D type=\"Vector\" allowHeterogeneousChildren=\"1\">\n",
+        );
+        for (i, scan) in scans.iter().enumerate() {
+            let start = logical.len() as u64;
+            let streams: Vec<Vec<u8>> = scan.fields.iter().map(stream).collect();
+            let mut packets = Vec::new();
+            let mut cut = vec![0usize; streams.len()];
+            let mut first = true;
+            while cut.iter().zip(&streams).any(|(c, s)| *c < s.len()) {
+                let mut parts = Vec::new();
+                for (k, s) in streams.iter().enumerate() {
+                    let to = (cut[k] + 5 + 3 * k).min(s.len());
+                    parts.push(&s[cut[k]..to]);
+                    cut[k] = to;
+                }
+                let mut p = vec![1u8, 0, 0, 0];
+                p.extend((parts.len() as u16).to_le_bytes());
+                for part in &parts {
+                    p.extend((part.len() as u16).to_le_bytes());
+                }
+                for part in &parts {
+                    p.extend(*part);
+                }
+                while !p.len().is_multiple_of(4) {
+                    p.push(0);
+                }
+                let len = (p.len() as u16 - 1).to_le_bytes();
+                (p[2], p[3]) = (len[0], len[1]);
+                packets.extend(p);
+                if first {
+                    packets.extend([2u8, 0, 7, 0, 0, 0, 0, 0]);
+                    first = false;
+                }
+            }
+            logical.extend([1u8, 0, 0, 0, 0, 0, 0, 0]);
+            logical.extend((32 + packets.len() as u64).to_le_bytes());
+            logical.extend(physical(start + 32).to_le_bytes());
+            logical.extend(0u64.to_le_bytes());
+            logical.extend(packets);
+            while !logical.len().is_multiple_of(4) {
+                logical.push(0);
+            }
+            let count = scan.fields.first().map_or(0, |f| f.values.len());
+            let prototype: String = scan.fields.iter().map(|f| f.xml.clone()).collect();
+            xml += &format!(
+                "<vectorChild type=\"Structure\">\n<name type=\"String\"><![CDATA[scan {i} & more]]></name>\n{}\n\
+                 <points type=\"CompressedVector\" fileOffset=\"{}\" recordCount=\"{count}\">\n\
+                 <prototype type=\"Structure\">{prototype}</prototype>\n\
+                 <codecs type=\"Vector\" allowHeterogeneousChildren=\"1\"></codecs>\n</points>\n</vectorChild>\n",
+                scan.more,
+                physical(start)
+            );
+        }
+        xml += "</data3D>\n<images2D type=\"Vector\" allowHeterogeneousChildren=\"1\"/>\n</e57Root>\n";
+        let xml_at = logical.len() as u64;
+        logical.extend(xml.bytes());
+        // The header, now that it knows where everything is.
+        let pages = (logical.len() as u64).div_ceil(DATA);
+        let mut h = b"ASTM-E57".to_vec();
+        h.extend(1u32.to_le_bytes());
+        h.extend(0u32.to_le_bytes());
+        h.extend((pages * PAGE).to_le_bytes());
+        h.extend(physical(xml_at).to_le_bytes());
+        h.extend((xml.len() as u64).to_le_bytes());
+        h.extend(PAGE.to_le_bytes());
+        logical[..48].copy_from_slice(&h);
+        let mut file = Vec::new();
+        for chunk in logical.chunks(DATA as usize) {
+            file.extend(chunk);
+            file.resize(file.len().div_ceil(PAGE as usize) * PAGE as usize, 0);
+        }
+        file
+    }
+
+    fn read(b: &[u8]) -> Result<Scan, String> {
+        read_cloud(b, Format::E57, &Options::default())
+    }
+
+    /// Each point in millimetres, to a thousandth.
+    fn all(s: &Scan) -> Vec<[f64; 3]> {
+        (0..s.points.len()).filter_map(|i| s.absolute(i)).map(|p| p.map(|v| (v * 1000.0).round() / 1000.0)).collect()
+    }
+
+    /// Enough points that their streams cross pages as well as packets.
+    fn grid(n: usize) -> Vec<[f64; 3]> {
+        (0..n).map(|i| [i as f64 * 0.01, (i % 7) as f64 * 0.5, -(i as f64) * 0.002]).collect()
+    }
+
+    #[test]
+    fn an_e57_scan_comes_in_with_its_colours() {
+        let pts = grid(700);
+        let mut fields = cartesian(&pts);
+        let shade = |k: usize| (0..pts.len()).map(|i| ((i * (k + 3)) % 256) as f64).collect::<Vec<_>>();
+        fields.push(integer("colorRed", 0, 255, &shade(0)));
+        fields.push(integer("colorGreen", 0, 255, &shade(1)));
+        fields.push(integer("colorBlue", 0, 255, &shade(2)));
+        let file = e57(&[Scan57 { fields, more: String::new() }]);
+        assert!(file.len() > 3 * PAGE as usize, "the test's file spans pages");
+        let s = read(&file).unwrap();
+        assert_eq!((s.read, s.points.len()), (700, 700));
+        for (got, p) in all(&s).iter().zip(&pts) {
+            let want = p.map(|v| f64::from(v as f32) * 1000.0);
+            assert!((0..3).all(|k| (got[k] - want[k]).abs() < 0.01), "{got:?} {want:?}");
+        }
+        let colours = s.colours.unwrap();
+        assert_eq!(colours[0], [0, 0, 0]);
+        assert_eq!(colours[100], [(300 % 256) as u8, (400 % 256) as u8, (500 % 256) as u8]);
+    }
+
+    #[test]
+    fn every_scan_in_a_file_comes_in_placed_by_its_pose() {
+        let one = Scan57 { fields: cartesian(&[[1.0, 0.0, 0.0]]), more: String::new() };
+        // A quarter turn about z, then 10 m east and 2 m up.
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        let pose = format!(
+            "<pose type=\"Structure\"><rotation type=\"Structure\"><w type=\"Float\">{h}</w><x type=\"Float\">0</x>\
+             <y type=\"Float\">0</y><z type=\"Float\">{h}</z></rotation><translation type=\"Structure\"><x type=\"Float\">10</x>\
+             <y type=\"Float\">0</y><z type=\"Float\">2</z></translation></pose>"
+        );
+        let two = Scan57 { fields: cartesian(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]), more: pose };
+        let s = read(&e57(&[one, two])).unwrap();
+        assert_eq!(all(&s), vec![[1000.0, 0.0, 0.0], [10000.0, 1000.0, 2000.0], [9000.0, 0.0, 2000.0]]);
+    }
+
+    #[test]
+    fn scaled_integers_spherical_points_and_invalid_ones_come_in_as_the_standard_says() {
+        // Millimetres in odd widths of bits, an intensity in a double, and a point marked invalid, left out.
+        let fields = vec![
+            scaled("cartesianX", -1000, 2000, 0.001, 0.0, &[0.0, 1.234, -0.5]),
+            scaled("cartesianY", 0, 5, 0.5, 10.0, &[10.0, 11.5, 12.5]),
+            float("cartesianZ", false, &[0.25, 0.5, 0.75]),
+            float("intensity", false, &[0.0, 0.5, 1.0]),
+            integer("cartesianInvalidState", 0, 2, &[0.0, 0.0, 2.0]),
+        ];
+        let s = read(&e57(&[Scan57 { fields, more: String::new() }])).unwrap();
+        assert_eq!(all(&s), vec![[0.0, 10000.0, 250.0], [1234.0, 11500.0, 500.0]]);
+        let grey: Vec<u8> = s.colours.unwrap().iter().map(|c| c[0]).collect();
+        assert_eq!(grey, vec![0, 255], "intensity from the darkest to the lightest");
+        // Range, azimuth and elevation: 2 m north, then 1 m straight up.
+        let q = std::f64::consts::FRAC_PI_2;
+        let fields = vec![
+            float("sphericalRange", false, &[2.0, 1.0]),
+            float("sphericalAzimuth", false, &[q, 0.0]),
+            float("sphericalElevation", false, &[0.0, q]),
+        ];
+        let s = read(&e57(&[Scan57 { fields, more: String::new() }])).unwrap();
+        assert_eq!(all(&s), vec![[0.0, 2000.0, 0.0], [0.0, 0.0, 1000.0]]);
+    }
+
+    #[test]
+    fn colour_limits_say_what_full_colour_is() {
+        let mut fields = cartesian(&[[0.0; 3], [1.0, 0.0, 0.0]]);
+        for n in ["colorRed", "colorGreen", "colorBlue"] {
+            fields.push(integer(n, 0, 65535, &[65535.0, 0.0]));
+        }
+        let more = "<colorLimits type=\"Structure\"><colorRedMinimum type=\"Integer\">0</colorRedMinimum>\
+                    <colorRedMaximum type=\"Integer\">65535</colorRedMaximum></colorLimits>";
+        let s = read(&e57(&[Scan57 { fields, more: more.into() }])).unwrap();
+        assert_eq!(s.colours.unwrap(), vec![[255, 255, 255], [0, 0, 0]]);
+    }
+
+    #[test]
+    fn a_broken_e57_says_why_and_never_crashes() {
+        let good = e57(&[Scan57 { fields: cartesian(&grid(300)), more: String::new() }]);
+        assert!(read(&good).is_ok());
+        let says = |b: &[u8], what: &str| {
+            let e = read(b).unwrap_err();
+            assert!(e.contains(what), "{what}: {e}");
+        };
+        says(b"not an e57 at all", "ASTM-E57");
+        says(&good[..40], "cut short");
+        says(&good[..good.len() / 2], "cut short");
+        let mut v2 = good.clone();
+        v2[8] = 2;
+        says(&v2, "version 2");
+        // The XML changed in place, its length in the header with it.
+        let xml_at = u64::from_le_bytes(good[24..32].try_into().unwrap()) as usize;
+        let xml_len = u64::from_le_bytes(good[32..40].try_into().unwrap()) as usize;
+        let with = |from: &str, to: &str| {
+            let start = xml_at as u64 / PAGE * DATA + xml_at as u64 % PAGE;
+            let mut raw = Vec::new();
+            Paged { bytes: &good }.take(start, xml_len, &mut raw).unwrap();
+            let xml = String::from_utf8(raw).unwrap().replace(from, to);
+            let mut b = good[..xml_at].to_vec();
+            b[32..40].copy_from_slice(&(xml.len() as u64).to_le_bytes());
+            for (j, c) in xml.bytes().enumerate() {
+                let at = physical(start + j as u64) as usize;
+                b.resize(b.len().max(at + 1), 0);
+                b[at] = c;
+            }
+            b
+        };
+        assert!(read(&with("", "")).is_ok());
+        says(&with("\"1\"></codecs>", "\"1\"><x/></codecs>"), "codec");
+        says(&with("recordCount=\"300\"", "recordCount=\"900\""), "missing");
+        says(&with("<data3D", "<data3X"), "broken");
+        says(&with("type=\"Float\" precision", "type=\"String\" precision"), "String");
+        // Bytes changed all through it: an answer, never a panic.
+        for i in (0..good.len()).step_by(3) {
+            for v in [0u8, 0xFF, 0x7F, 0x80] {
+                let mut b = good.clone();
+                b[i] = v;
+                let _ = read(&b);
+            }
+        }
+    }
+}

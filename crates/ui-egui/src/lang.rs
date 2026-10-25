@@ -1781,9 +1781,9 @@ const WORDS: &[[&str; 3]] = &[
     ["Insert", "Inserir", "Insertar"],
     ["Link", "Vincular", "Vincular"],
     [
-        "Point Cloud: laser scans (PTS, XYZ, PLY or LAS) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to",
-        "Nuvem de pontos: escaneamentos a laser (PTS, XYZ, PLY ou LAS) trazidos para o projeto, um arquivo ou as estações de um levantamento como um só escaneamento, desenhados na vista 3D, nas plantas e nos cortes e usados como snap",
-        "Nube de puntos: escaneos láser (PTS, XYZ, PLY o LAS) traídos al proyecto, un archivo o las estaciones de un levantamiento como un solo escaneo, dibujados en la vista 3D, las plantas y los cortes y usados como referencia",
+        "Point Cloud: laser scans (PTS, XYZ, PLY, LAS or E57) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to",
+        "Nuvem de pontos: escaneamentos a laser (PTS, XYZ, PLY, LAS ou E57) trazidos para o projeto, um arquivo ou as estações de um levantamento como um só escaneamento, desenhados na vista 3D, nas plantas e nos cortes e usados como snap",
+        "Nube de puntos: escaneos láser (PTS, XYZ, PLY, LAS o E57) traídos al proyecto, un archivo o las estaciones de un levantamiento como un solo escaneo, dibujados en la vista 3D, las plantas y los cortes y usados como referencia",
     ],
     ["Point clouds", "Nuvens de pontos", "Nubes de puntos"],
     [

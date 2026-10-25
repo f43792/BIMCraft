@@ -1,5 +1,5 @@
 //! Point clouds: what a laser scan brings in. A file's points are read from public specifications
-//! (PTS and XYZ text, PLY, ASPRS LAS 1.2 to 1.4), turned into millimetres, thinned to what a project
+//! (PTS and XYZ text, PLY, ASPRS LAS 1.2 to 1.4, ASTM E57), turned into millimetres, thinned to what a project
 //! may hold, and kept about their centre as `f32`, which holds a millimetre across `MAX_SPAN`. A
 //! project holds each scan once, as a [`Cloud`]; a `PointCloud` element places it.
 
@@ -12,6 +12,8 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 
 use serde::{Deserialize, Serialize};
+
+mod e57;
 
 /// Points a cloud may keep: a file with more is thinned down to it.
 pub const MAX_CLOUD_POINTS: usize = 5_000_000;
@@ -40,6 +42,8 @@ pub enum Format {
     Ply,
     /// ASPRS LAS 1.2 to 1.4, uncompressed.
     Las,
+    /// ASTM E57: every scan the file holds, placed by its pose.
+    E57,
 }
 
 impl Format {
@@ -52,9 +56,9 @@ impl Format {
             "ply" => Ok(Format::Ply),
             "las" => Ok(Format::Las),
             "laz" => Err("LAZ is compressed LAS, which BIMCraft doesn't read: decompress it to LAS first (laszip or PDAL)".into()),
-            "e57" => Err("E57 isn't read yet: export the scan as LAS, PLY or PTS".into()),
+            "e57" => Ok(Format::E57),
             "rcp" | "rcs" => Err("ReCap's RCP and RCS are closed formats: export the scan from ReCap as E57, LAS or PTS".into()),
-            _ => Err(format!("a .{ext} file isn't a point cloud BIMCraft reads: PTS, XYZ, PLY or LAS")),
+            _ => Err(format!("a .{ext} file isn't a point cloud BIMCraft reads: PTS, XYZ, PLY, LAS or E57")),
         }
     }
 }
@@ -607,6 +611,7 @@ fn each(bytes: &[u8], format: Format, f: &mut impl FnMut(Raw) -> Result<(), Stri
         Format::Pts | Format::Xyz => text(bytes, format == Format::Pts, f),
         Format::Ply => ply(bytes, f),
         Format::Las => las(bytes, f),
+        Format::E57 => e57::read(bytes, f),
     }
 }
 
@@ -1026,10 +1031,18 @@ mod tests {
 
     #[test]
     fn formats_come_from_extensions_and_the_ones_it_cant_read_say_why() {
-        for (ext, f) in [("pts", Format::Pts), ("XYZ", Format::Xyz), ("txt", Format::Xyz), ("ply", Format::Ply), (".las", Format::Las)] {
+        let known = [
+            ("pts", Format::Pts),
+            ("XYZ", Format::Xyz),
+            ("txt", Format::Xyz),
+            ("ply", Format::Ply),
+            (".las", Format::Las),
+            ("E57", Format::E57),
+        ];
+        for (ext, f) in known {
             assert_eq!(Format::from_extension(ext), Ok(f), "{ext}");
         }
-        for (ext, says) in [("laz", "LAZ"), ("e57", "E57"), ("rcp", "ReCap"), ("rcs", "ReCap"), ("dwg", "dwg")] {
+        for (ext, says) in [("laz", "LAZ"), ("rcp", "ReCap"), ("rcs", "ReCap"), ("dwg", "dwg")] {
             let e = Format::from_extension(ext).unwrap_err();
             assert!(e.contains(says), "{ext}: {e}");
         }

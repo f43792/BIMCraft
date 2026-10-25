@@ -1107,8 +1107,8 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Insert", "插入"],
     ["Link", "链接"],
     [
-        "Point Cloud: laser scans (PTS, XYZ, PLY or LAS) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to",
-        "点云：将激光扫描（PTS、XYZ、PLY 或 LAS）引入项目，单个文件或一次测量的各测站合为一个扫描，在三维视图、平面和剖面中绘制并可捕捉",
+        "Point Cloud: laser scans (PTS, XYZ, PLY, LAS or E57) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to",
+        "点云：将激光扫描（PTS、XYZ、PLY、LAS 或 E57）引入项目，单个文件或一次测量的各测站合为一个扫描，在三维视图、平面和剖面中绘制并可捕捉",
     ],
     ["Point clouds", "点云"],
     ["{} files, brought in as one scan's stations", "{} 个文件，作为一个扫描的各测站引入"],
