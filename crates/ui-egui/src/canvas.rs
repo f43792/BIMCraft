@@ -807,6 +807,12 @@ impl BimApp {
                     stroke,
                 ));
             }
+            // A scan's point: a cross, upright, round a dot.
+            Kind::Point => {
+                p.line_segment([at + vec2(-7.0, 0.0), at + vec2(7.0, 0.0)], stroke);
+                p.line_segment([at + vec2(0.0, -7.0), at + vec2(0.0, 7.0)], stroke);
+                p.circle_filled(at, 2.5, pal().accent);
+            }
             Kind::Angle => {
                 p.circle_filled(at, 3.0, pal().accent);
             }

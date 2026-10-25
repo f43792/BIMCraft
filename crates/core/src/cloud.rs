@@ -3,7 +3,7 @@
 //! may hold, and kept about their centre as `f32`, which holds a millimetre across `MAX_SPAN`. A
 //! project holds each scan once, as a [`Cloud`]; a `PointCloud` element places it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::{Arc, OnceLock};
 
@@ -25,6 +25,8 @@ pub const MAX_SPAN: f64 = 2e7;
 pub const MAX_CLOUDS: usize = 16;
 /// Files one scan may be brought in from: a survey's stations.
 pub const MAX_STATIONS: usize = 256;
+/// How wide a square of a cloud's [`Grid`] is, mm.
+const CELL: f64 = 250.0;
 
 /// What a file of points is written as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +180,17 @@ pub struct Cloud {
     hi: [f32; 3],
     /// What a project file holds of it, made the first time it's saved.
     packed: Arc<OnceLock<CloudFile>>,
+    /// Where its points are from above, made the first time something snaps to it.
+    grid: Arc<OnceLock<Grid>>,
+}
+
+/// A cloud's points by the square [`CELL`] mm wide they lie in, seen from above.
+struct Grid {
+    cells: HashMap<(i64, i64), Vec<u32>>,
+}
+
+fn cell(v: f64) -> i64 {
+    (v / CELL).floor() as i64
 }
 
 impl std::fmt::Debug for Cloud {
@@ -267,6 +280,7 @@ impl Cloud {
             lo,
             hi,
             packed: Arc::default(),
+            grid: Arc::default(),
         })
     }
 
@@ -314,6 +328,41 @@ impl Cloud {
 
     pub(crate) fn shared_colours(&self) -> Option<Arc<Vec<[u8; 3]>>> {
         self.colours.clone()
+    }
+
+    /// Of its points whose height from its middle lies within `z`, the nearest to `at` (from its middle, mm) seen from above and
+    /// no farther than `reach`: what a plan snaps to. It looks only in the squares of its [`Grid`] that `reach` touches.
+    pub fn nearest(&self, at: [f64; 2], reach: f64, z: (f64, f64)) -> Option<[f32; 3]> {
+        if !(reach.is_finite() && reach >= 0.0 && at.iter().all(|v| v.is_finite() && v.abs() <= MAX_FILE_COORD)) {
+            return None;
+        }
+        // Only the squares it has: none when `at` is far from it.
+        let (lo, hi) = self.bounds();
+        let (x0, x1) = (cell((at[0] - reach).max(lo[0])), cell((at[0] + reach).min(hi[0])));
+        let (y0, y1) = (cell((at[1] - reach).max(lo[1])), cell((at[1] + reach).min(hi[1])));
+        if x0 > x1 || y0 > y1 {
+            return None;
+        }
+        let grid = self.grid.get_or_init(|| {
+            let mut cells: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+            for (i, p) in self.points.iter().enumerate() {
+                cells.entry((cell(f64::from(p[0])), cell(f64::from(p[1])))).or_default().push(i as u32);
+            }
+            Grid { cells }
+        });
+        let mut best: Option<(f64, [f32; 3])> = None;
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for &i in grid.cells.get(&(x, y)).into_iter().flatten() {
+                    let Some(&p) = self.points.get(i as usize) else { continue };
+                    let d = (f64::from(p[0]) - at[0]).hypot(f64::from(p[1]) - at[1]);
+                    if d <= reach && (z.0..=z.1).contains(&f64::from(p[2])) && best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, p));
+                    }
+                }
+            }
+        }
+        best.map(|(_, p)| p)
     }
 
     /// The box round its points, from its middle, mm.

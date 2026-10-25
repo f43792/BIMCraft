@@ -437,3 +437,65 @@ fn a_section_shows_a_scan_between_its_line_and_its_far_clip() {
     let img = look(&mut s, Some(500.0));
     assert_eq!((pixels(&img, red), pixels(&img, blue)), (0, 0));
 }
+
+// ---------- snaps ----------
+
+use crate::snap::{Kind, Reach, Snaps, snap};
+
+#[test]
+fn a_plan_snaps_to_a_scan_where_its_cut_plane_cuts_it() {
+    let mut s = Session::new();
+    // A scanned wall face along y = 0, from x = 0 to 2 m and 2 m tall: a plan cutting at 1200 cuts it along its length.
+    let id = run(&mut s, "point_cloud", json!({"path": scan("snap", "face.xyz", &sheet(Some([255, 0, 0]))), "origin": "file"}))["id"]
+        .as_u64()
+        .unwrap();
+    let levels = run(&mut s, "elements", json!({"category": "level"}));
+    let level = |n: usize| levels["elements"][n]["id"].as_u64().unwrap();
+    let reach = Reach { point: 100.0, line: 100.0 };
+    let at = |s: &Session, level: u64, p: P2, o: &Snaps| snap(&s.model, level, p, reach, &[], false, o);
+    let f = at(&s, level(0), P2(1003.0, 37.0), &Snaps::default());
+    assert_eq!((f.kind, f.at), (Kind::Point, P2(1000.0, 0.0)), "{f:?}");
+    assert_eq!(Kind::Point.name(), "Point Cloud");
+    // Out of reach, or switched off, it doesn't.
+    assert_eq!(at(&s, level(0), P2(1000.0, 300.0), &Snaps::default()).kind, Kind::Free);
+    assert_eq!(at(&s, level(0), P2(1003.0, 37.0), &Snaps { cloud: false, ..Snaps::default() }).kind, Kind::Free);
+    assert_eq!(at(&s, level(0), P2(1003.0, 37.0), &Snaps::only(Kind::Point)).kind, Kind::Point);
+    // Level 2's cut plane passes over it.
+    assert_eq!(at(&s, level(1), P2(1003.0, 37.0), &Snaps::default()).kind, Kind::Free);
+    // What the model has to snap to comes first: a wall's end beats a point nearer the cursor.
+    run(&mut s, "wall", json!({"points": [[1000, 60], [1000, 3000]]}));
+    let f = at(&s, level(0), P2(1000.0, 20.0), &Snaps::default());
+    assert_eq!((f.kind, f.at), (Kind::Endpoint, P2(1000.0, 60.0)), "{f:?}");
+    run(&mut s, "undo", json!({}));
+    // Placed again, turned a quarter about its middle, it snaps where it now is.
+    run(&mut s, "point_cloud", json!({"cloud": "face", "at": [10_000, 0], "angle": 90}));
+    let f = at(&s, level(0), P2(10_030.0, 500.0), &Snaps::default());
+    assert_eq!((f.kind, f.at), (Kind::Point, P2(10_000.0, 500.0)), "{f:?}");
+    // A view that hides it doesn't snap to it.
+    run(&mut s, "graphics", json!({"view": level(0), "hide_elements": [id]}));
+    assert_eq!(at(&s, level(0), P2(1003.0, 37.0), &Snaps::default()).kind, Kind::Free);
+}
+
+#[test]
+fn a_snap_on_a_big_scan_looks_only_near_the_cursor() {
+    let mut s = Session::new();
+    // A million points over a 100 m square, a tenth of a metre apart, at the cut plane.
+    let mut text = String::new();
+    for i in 0..1000 {
+        for k in 0..1000 {
+            text += &format!("{} {} 1.2\n", f64::from(i) * 0.1, f64::from(k) * 0.1);
+        }
+    }
+    run(&mut s, "point_cloud", json!({"path": scan("big", "big.xyz", &text), "origin": "file"}));
+    let level = run(&mut s, "elements", json!({"category": "level"}))["elements"][0]["id"].as_u64().unwrap();
+    let reach = Reach { point: 80.0, line: 80.0 };
+    let first = snap(&s.model, level, P2(50_010.0, 50_020.0), reach, &[], false, &Snaps::default());
+    assert_eq!((first.kind, first.at), (Kind::Point, P2(50_000.0, 50_000.0)));
+    let started = std::time::Instant::now();
+    for i in 0..100 {
+        let p = P2(1000.0 + f64::from(i) * 917.0, 2000.0 + f64::from(i) * 613.0);
+        assert_eq!(snap(&s.model, level, p, reach, &[], false, &Snaps::default()).kind, Kind::Point);
+    }
+    let each = started.elapsed() / 100;
+    assert!(each < std::time::Duration::from_millis(5), "{each:?} a snap");
+}
