@@ -9,10 +9,13 @@ use super::*;
 use crate::Status;
 use crate::dialog::Dialog;
 
-/// A dialog that, once answered, says the path in the status box.
-fn open_dialog(h: &mut Harness<BimApp>) -> std::sync::mpsc::Sender<Option<PathBuf>> {
+/// A dialog that, once answered, says the paths in the status box.
+fn open_dialog(h: &mut Harness<BimApp>) -> std::sync::mpsc::Sender<Option<Vec<PathBuf>>> {
     let (tx, answer) = channel();
-    let then = Box::new(|app: &mut BimApp, path: PathBuf| app.status = Status { text: path.display().to_string(), error: false });
+    let then = Box::new(|app: &mut BimApp, paths: Vec<PathBuf>| {
+        let said: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        app.status = Status { text: said.join("; "), error: false };
+    });
     h.state_mut().dialog = Some(Dialog { answer, then });
     tx
 }
@@ -24,10 +27,15 @@ fn a_dialogs_path_is_acted_on_in_a_later_frame_and_the_window_goes_on_meanwhile(
     h.step();
     h.step();
     assert!(h.state().dialog.is_some() && h.state().status.text.is_empty(), "no answer yet: nothing done, and the frames run");
-    tx.send(Some("/projects/house.bimcraft".into())).unwrap();
+    tx.send(Some(vec!["/projects/house.bimcraft".into()])).unwrap();
     h.step();
     assert!(h.state().dialog.is_none());
     assert_eq!(h.state().status.text, "/projects/house.bimcraft");
+    // A dialog that picks several gives them all, in order.
+    let tx = open_dialog(&mut h);
+    tx.send(Some(vec!["/scans/a.ply".into(), "/scans/b.ply".into()])).unwrap();
+    h.step();
+    assert_eq!(h.state().status.text, "/scans/a.ply; /scans/b.ply");
 }
 
 #[test]

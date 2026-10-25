@@ -1,7 +1,8 @@
 # Point clouds
 
-On the roadmap under 0.9 Interoperability. A project holds scans and places them, and the 3D view, plans and sections draw
-them.
+On the roadmap under 0.9 Interoperability. A project holds scans and places them, the 3D view, plans and sections draw them,
+plans snap to them, and the desktop brings them in (Insert > Point Cloud). IFC leaves them out, as Revit's export does: IFC4 has
+no point cloud, and `ifc_leaves_scans_out_as_revit_does` keeps the file what it was without them.
 
 Point clouds (`cloud.rs`) come from public specifications: PTS and XYZ text, PLY (text or either byte order) and ASPRS LAS 1.0
 to 1.4 uncompressed (`Format::from_extension` says why LAZ, E57 and ReCap's RCP/RCS don't). `cloud::read` parses a file twice,
@@ -61,3 +62,10 @@ before the perpendicular, the angle guides and a wall's centre line. `snap::clou
 own terms and asks `Cloud::nearest`, which looks only in the squares of the scan's `Grid` (its points by `CELL` mm squares from
 above, made the first time something snaps to it and shared by its clones) that the reach touches, so a snap on millions of points
 costs microseconds.
+
+In the desktop (`clouds.rs`), Insert > Point Cloud, in the Insert tab's Link panel beside Link Model as in Revit, asks for one
+file or several (`BimApp::ask_files`: a dialog's answer is a list of paths now) and opens `CloudBox`: its name (the first file's),
+the units of its coordinates, a spacing, and Revit's positioning, Auto - Center to Center or Auto - Origin to Origin. OK runs
+`point_cloud` on the level of the plan on screen and selects what it placed; a refusal stays in the box with its reason
+(`point_cloud_paths` opens the box, what a test hands the files to). The Properties palette shows a point cloud's level and offset
+(edited), its scan, file and points, its origin and angle; Visibility/Graphics lists `pointcloud` after the model's categories.

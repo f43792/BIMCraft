@@ -7,6 +7,7 @@
 
 mod browser;
 mod canvas;
+mod clouds;
 mod context;
 pub mod control;
 mod dialog;
@@ -214,6 +215,7 @@ enum Tab {
     Electrical,
     Lightning,
     Data,
+    Insert,
     Annotate,
     Massing,
     View,
@@ -472,6 +474,10 @@ pub struct BimApp {
     seen: Option<(Arc<Model>, Arc<Model>)>,
     /// Link Model was asked for: its file dialog opens on the next frame, so a shortcut typed alone never waits on one.
     link_dialog: bool,
+    /// Insert > Point Cloud was pressed: its file dialog opens this frame.
+    cloud_dialog: bool,
+    /// Bringing scan files in: the box, while it's open.
+    cloud_box: Option<clouds::CloudBox>,
     /// A selected element's temporary dimension being typed: the element, which of its dimensions (a wall has one, a
     /// door or window two: from its wall's start, from its end), the length so far.
     dim_edit: Option<(Id, usize, String)>,
@@ -843,6 +849,8 @@ impl BimApp {
             shadow: None,
             seen: None,
             link_dialog: false,
+            cloud_dialog: false,
+            cloud_box: None,
             tab_cycle: false,
             held: Vec::new(),
             show_shortcuts: false,
@@ -2267,6 +2275,7 @@ impl BimApp {
                     (Tab::Electrical, "Electrical"),
                     (Tab::Lightning, "Lightning Protection"),
                     (Tab::Data, "Data"),
+                    (Tab::Insert, "Insert"),
                     (Tab::Annotate, "Annotate"),
                     (Tab::Massing, "Massing"),
                     (Tab::View, "View"),
@@ -2349,6 +2358,7 @@ impl BimApp {
                     Tab::Electrical => self.electrical_tab(ui),
                     Tab::Lightning => self.lightning_tab(ui),
                     Tab::Data => self.data_tab(ui),
+                    Tab::Insert => self.insert_tab(ui),
                     Tab::Annotate => self.annotate_tab(ui),
                     Tab::Massing => self.massing_tab(ui),
                     Tab::View => self.view_tab(ui),
@@ -2771,6 +2781,20 @@ impl BimApp {
     }
 
     /// Manage: the project's settings, as Revit's tab has them.
+    /// Insert: what comes into the project from other files, as Revit's tab. Link: other projects, and laser scans.
+    fn insert_tab(&mut self, ui: &mut Ui) {
+        panel(ui, "Link", |ui| {
+            let tip = "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to";
+            if big_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
+                self.link_dialog = true;
+            }
+            let tip = "Point Cloud: laser scans (PTS, XYZ, PLY or LAS) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to";
+            if big_button(ui, Icon::PointCloud, "Point Cloud", self.cloud_box.is_some(), tip).clicked() {
+                self.cloud_dialog = true;
+            }
+        });
+    }
+
     fn manage_tab(&mut self, ui: &mut Ui) {
         panel(ui, "Settings", |ui| {
             let tip = "Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show";
@@ -3603,6 +3627,10 @@ impl BimApp {
         if std::mem::take(&mut self.link_dialog) {
             self.link_model_dialog(ctx);
         }
+        if std::mem::take(&mut self.cloud_dialog) {
+            self.point_cloud_dialog(ctx);
+        }
+        self.point_cloud_window(ctx);
         self.select_by_id_window(ctx);
         self.ids_of_selection_window(ctx);
         self.shortcuts_window(ctx);

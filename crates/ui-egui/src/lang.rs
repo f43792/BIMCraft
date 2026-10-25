@@ -221,6 +221,7 @@ pub fn category(category: &str, several: bool) -> String {
         "schedule" => (["Schedule", "Tabela", "Tabla"], ["Schedules", "Tabelas", "Tablas"]),
         "view3d" => (["3D View", "Vista 3D", "Vista 3D"], ["3D Views", "Vistas 3D", "Vistas 3D"]),
         "link" => (["Linked Model", "Modelo vinculado", "Modelo vinculado"], ["Linked Models", "Modelos vinculados", "Modelos vinculados"]),
+        "pointcloud" => (["Point Cloud", "Nuvem de pontos", "Nube de puntos"], ["Point Clouds", "Nuvens de pontos", "Nubes de puntos"]),
         other => return other.to_string(),
     };
     get().project().of(if several { many } else { one }).to_string()
@@ -1776,6 +1777,37 @@ const WORDS: &[[&str; 3]] = &[
         "selecione primeiro um elemento que tenha um tipo",
         "selecciona primero un elemento que tenga un tipo",
     ],
+    // Insert > Point Cloud.
+    ["Insert", "Inserir", "Insertar"],
+    ["Link", "Vincular", "Vincular"],
+    [
+        "Point Cloud: laser scans (PTS, XYZ, PLY or LAS) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to",
+        "Nuvem de pontos: escaneamentos a laser (PTS, XYZ, PLY ou LAS) trazidos para o projeto, um arquivo ou as estações de um levantamento como um só escaneamento, desenhados na vista 3D, nas plantas e nos cortes e usados como snap",
+        "Nube de puntos: escaneos láser (PTS, XYZ, PLY o LAS) traídos al proyecto, un archivo o las estaciones de un levantamiento como un solo escaneo, dibujados en la vista 3D, las plantas y los cortes y usados como referencia",
+    ],
+    ["Point clouds", "Nuvens de pontos", "Nubes de puntos"],
+    [
+        "{} files, brought in as one scan's stations",
+        "{} arquivos, trazidos como as estações de um só escaneamento",
+        "{} archivos, traídos como las estaciones de un solo escaneo",
+    ],
+    ["Units", "Unidades", "Unidades"],
+    ["Spacing (mm)", "Espaçamento (mm)", "Espaciado (mm)"],
+    ["all the points", "todos os pontos", "todos los puntos"],
+    ["Positioning", "Posicionamento", "Posicionamiento"],
+    ["Auto - Center to Center", "Auto - Centro a centro", "Auto - Centro a centro"],
+    ["Auto - Origin to Origin", "Auto - Origem a origem", "Auto - Origen a origen"],
+    [
+        "Its middle on the project's origin and its foot on the level",
+        "O meio dele na origem do projeto e a base dele no nível",
+        "Su centro en el origen del proyecto y su base en el nivel",
+    ],
+    [
+        "Where its file's coordinates put it, as the survey placed it",
+        "Onde as coordenadas do arquivo o colocam, como o levantamento o posicionou",
+        "Donde lo ponen las coordenadas de su archivo, como lo situó el levantamiento",
+    ],
+    ["Scan", "Escaneamento", "Escaneo"],
     // Snaps and the ruler.
     ["Measure", "Medir", "Medir"],
     [

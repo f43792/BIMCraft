@@ -225,13 +225,20 @@ fn a_scan_is_saved_with_the_project_and_opens_as_it_was() {
 }
 
 #[test]
-fn a_project_with_a_scan_still_exports_ifc() {
+fn ifc_leaves_scans_out_as_revit_does() {
     let mut s = Session::new();
+    run(&mut s, "wall", json!({"points": [[0, 0], [4000, 0]]}));
+    let entities = |s: &mut Session, name: &str| {
+        let file = std::env::temp_dir().join(format!("bimcraft-cloud-{}-{name}.ifc", std::process::id()));
+        run(s, "save", json!({"path": file}));
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("ISO-10303-21;") && text.contains("IFCPROJECT"));
+        text.lines().filter(|l| l.starts_with('#')).count()
+    };
+    let without = entities(&mut s, "without");
     run(&mut s, "point_cloud", json!({"path": scan("ifc", "box.xyz", BOX)}));
-    let file = std::env::temp_dir().join(format!("bimcraft-cloud-{}-scan.ifc", std::process::id()));
-    run(&mut s, "save", json!({"path": file}));
-    let text = std::fs::read_to_string(&file).unwrap();
-    assert!(text.starts_with("ISO-10303-21;") && text.contains("IFCPROJECT"));
+    // IFC4 has no point cloud: the file is what it was, entity for entity.
+    assert_eq!(entities(&mut s, "with"), without);
 }
 
 #[test]

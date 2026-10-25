@@ -276,6 +276,15 @@ fn rows(category: &str) -> &'static [Row] {
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
         ],
+        "pointcloud" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Constraints", "offset", "Offset", Length),
+            ("Identity Data", "cloud", "Scan", Shown),
+            ("Identity Data", "source", "File", Shown),
+            ("Identity Data", "points", "Points", Shown),
+            ("Other", "at", "Origin", Point),
+            ("Other", "angle", "Angle", Number),
+        ],
         "link" => &[
             ("Identity Data", "name", "Name", Text),
             ("Identity Data", "path", "File", Shown),
@@ -383,6 +392,7 @@ fn icon(category: &str) -> Icon {
         "text" => Icon::Text,
         "spot" => Icon::Spot,
         "view3d" => Icon::View3D,
+        "pointcloud" => Icon::PointCloud,
         _ => Icon::Plan,
     }
 }

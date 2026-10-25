@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bimcraft_core::graphics::{ANNOTATION, Applied, Dash, Detail, Graphics, Group, MODEL, Override, Style, VisualStyle};
+use bimcraft_core::graphics::{ANNOTATION, Applied, Dash, Detail, Graphics, Group, MODEL, Override, SCANS, Style, VisualStyle};
 use bimcraft_core::model::{Element, Guid, Id, Model};
 use bimcraft_core::pen::{MAX_PEN, Pen};
 use bimcraft_core::schedule;
@@ -314,8 +314,9 @@ impl BimApp {
             let shown = d.draft.resolved(&model).into_owned();
             match d.tab {
                 0 | 1 => {
-                    let names: &[&str] = if d.tab == 0 { &MODEL } else { &ANNOTATION };
-                    styles = categories(ui, &mut d, &model, &shown, names, !followed.contains(&Group::Categories));
+                    // A view's point clouds with its model's categories: Revit gives them a tab of their own.
+                    let names: Vec<&str> = if d.tab == 0 { MODEL.iter().chain(&SCANS).copied().collect() } else { ANNOTATION.to_vec() };
+                    styles = categories(ui, &mut d, &model, &shown, &names, !followed.contains(&Group::Categories));
                 }
                 2 => filters(ui, &mut d, &model, &shown, !followed.contains(&Group::Filters)),
                 3 => elements(ui, &mut d, &model, &self.selection),
