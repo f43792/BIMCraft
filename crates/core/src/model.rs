@@ -90,11 +90,23 @@ pub struct Level {
     /// What its plan hides and how it draws the rest.
     #[serde(default, skip_serializing_if = "Graphics::is_default")]
     pub graphics: Graphics,
+    /// Whether its plan shows what the default 3D view's section box keeps, while it's on: the box's heights as its view
+    /// range and its sides as its crop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub section_box: bool,
 }
 
 impl Level {
     pub fn new(name: impl Into<String>, elevation: f64) -> Level {
-        Level { name: name.into(), elevation, view_range: ViewRange::default(), crop: None, extent: None, graphics: Graphics::default() }
+        Level {
+            name: name.into(),
+            elevation,
+            view_range: ViewRange::default(),
+            crop: None,
+            extent: None,
+            graphics: Graphics::default(),
+            section_box: false,
+        }
     }
 }
 
@@ -672,6 +684,10 @@ pub struct PlanView {
     pub graphics: Graphics,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<Guid>,
+    /// Whether its plan shows what the default 3D view's section box keeps, while it's on: the box's heights as its view
+    /// range and its sides as its crop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub section_box: bool,
 }
 
 /// A 3D view, seen from `azimuth` degrees round from east (counter-clockwise) and `elevation`
@@ -2395,6 +2411,37 @@ impl Model {
         let r = self.view_range_of(key);
         let above = || self.level_above(level).map_or(f64::INFINITY, |a| self.elevation(a));
         PlanRange { top: r.top.map_or_else(above, |t| z + t).max(z + r.cut), cut: z + r.cut, bottom: z + r.bottom, depth: z + r.depth }
+    }
+
+    /// The default 3D view's section box, its min and max corners, if plan `key` follows it (a dependent view as its parent
+    /// does) and it's on.
+    pub fn plan_box(&self, key: impl Key) -> Option<([f64; 3], [f64; 3])> {
+        let follows = match self.elements.get(self.plan_source(key)) {
+            Some(Element::Level(l)) => l.section_box,
+            Some(Element::PlanView(v)) => v.section_box,
+            _ => false,
+        };
+        follows.then(|| self.default_3d().and_then(|v| self.section_box(v))).flatten()
+    }
+
+    /// The heights plan `key` shows: its view range's, or, following the section box, from the box's bottom up to its top,
+    /// where it cuts. What a plan draws and snaps to; commands that ask what a plan cuts keep its own range.
+    pub fn shown_range(&self, key: impl Key) -> PlanRange {
+        match self.plan_box(key) {
+            Some((lo, hi)) => PlanRange { top: hi[2], cut: hi[2], bottom: lo[2], depth: lo[2] },
+            None => self.plan_range(key),
+        }
+    }
+
+    /// The crop plan `key` is drawn with: its own crop region, cut to the section box's sides when it follows the box.
+    pub fn shown_crop(&self, key: impl Key) -> Option<[P2; 2]> {
+        let own = self.crop_of(key);
+        let Some((lo, hi)) = self.plan_box(key) else { return own };
+        let (blo, bhi) = (P2(lo[0], lo[1]), P2(hi[0], hi[1]));
+        Some(match own {
+            Some([a, b]) => [P2(a.0.max(blo.0), a.1.max(blo.1)), P2(b.0.min(bhi.0), b.1.min(bhi.1))],
+            None => [blo, bhi],
+        })
     }
 
     /// The level plan `key` is of: a level itself, or the level of a plan view.

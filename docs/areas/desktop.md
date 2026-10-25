@@ -105,7 +105,8 @@ West, East, South, North, Bottom and Top faces as lengths in the project's units
 `section_box`. In the view, `orbit.rs` draws the box's edges and, in Modify, an arrow on each face pointing out along its axis (a square
 for a face square to the screen); a primary drag from one (`section_box::grip_at`, within `GRIP` points) moves that face by
 `Camera::along` and `move_box_face`, the picture cut to the box as it goes (`Look::with_section_box`, part of the `Shot` it caches), and
-runs `section_box` when the drag ends. The grip takes the drag, not the camera, and a click on a grip picks nothing behind it.
+runs `section_box` when the drag ends. The grip takes the drag, not the camera, and a click on a grip picks nothing behind it. A
+plan's (and a plan view's) Properties have Section Box under Extents too, a `Flag` row: ticked, the plan shows what the box keeps.
 
 Unhide. Only Reveal Hidden Elements lets what a view hides be picked, so the Modify tab's View panel offers Unhide Element and Unhide Category (EU, VU) for a selection
 `BimApp::hidden_selection` finds the active view hiding: the elements hidden one by one, and the categories hidden whole. They run `graphics` with `show_elements` or `show`

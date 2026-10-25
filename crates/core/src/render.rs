@@ -711,7 +711,7 @@ pub fn plan(m: &Model, level: impl Key, width: u32, height: u32) -> Drawing {
 /// What a plan of `level` takes on paper: all it shows, or cropped, its crop region and the grids'
 /// ends at its edges.
 pub(crate) fn plan_extent(m: &Model, level: impl Key) -> Vec<P2> {
-    match m.crop_of(level) {
+    match m.shown_crop(level) {
         None => plan_shows(m, level),
         Some([lo, hi]) => {
             let grids = m.elements.values().filter_map(|e| match e {
@@ -729,7 +729,7 @@ pub(crate) fn plan_shows(m: &Model, plan: impl Key) -> Vec<P2> {
     // The plan's own guid says what it is: its graphics, range and annotation; its level is what it shows of the model.
     let key = m.guid(plan);
     let level = m.plan_level(key).map_or(key, |l| m.guid(l));
-    let r = m.plan_range(key);
+    let r = m.shown_range(key);
     let look = Look::of(m, key);
     let index = walls::Index::new(m);
     let mut extent: Vec<P2> = cut_outlines(m, r.cut, &look, &index).into_iter().flat_map(|(_, o)| o).collect();
@@ -1335,7 +1335,8 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
     (d.k, d.paper, d.detail, d.weights) = (k, paper_of(n, view.scale), detail_of(m, key), m.line_weights().at(n));
     let look = Look::of(m, key);
     let shown = |id: Id| look.shows(id);
-    let mut range = m.plan_range(key);
+    // A ceiling plan looks up from its own cut, whatever box its floor plan follows.
+    let mut range = if up { m.plan_range(key) } else { m.shown_range(key) };
     if up {
         range.cut = m.elevation(level) + CEILING_CUT;
         range.top = range.top.max(range.cut);
@@ -1465,7 +1466,7 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
     }
     d.part(Part::Projection);
     // A ceiling plan isn't cropped: the crop region is the floor plan's.
-    let crop = m.crop_of(key).filter(|_| !up);
+    let crop = m.shown_crop(key).filter(|_| !up);
     // Cropped, annotation shows whole while its anchor is inside the crop, and not at all outside it.
     let inside = |p: P2| crop.is_none_or(|[lo, hi]| (lo.0..=hi.0).contains(&p.0) && (lo.1..=hi.1).contains(&p.1));
     for (&id, e) in m.elements.iter().filter(|(id, _)| shown(**id)) {
@@ -2015,7 +2016,7 @@ fn stair(d: &mut Drawing, m: &Model, st: &Stair, level: impl Key) {
     let l = stairs::stair(m, st);
     let half = st.width / 2.0;
     // The riser the cut plane passes through, counted from the first; from above, none.
-    let rise = m.plan_range(level).cut - m.elevation(st.level);
+    let rise = m.shown_range(level).cut - m.elevation(st.level);
     let cut = if up && each > 0.0 { (rise / each).floor() } else { f64::INFINITY };
     // Risers below the run drawn.
     let mut below = 0.0;

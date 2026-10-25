@@ -52,3 +52,15 @@ fn a_drag_from_a_section_box_grip_moves_its_face_and_what_it_cuts_away_is_not_pi
     click_at(&mut h, at);
     assert!(h.state().selection.is_empty(), "{:?}", h.state().selection);
 }
+
+#[test]
+fn a_plans_section_box_in_properties_makes_it_show_what_the_box_keeps() {
+    let mut h = app(BOX);
+    h.state_mut().run("section_box", json!({"min": [-1000, -1000, 500], "max": [4000, 7000, 1500]}));
+    let level = h.state().session.model.levels()[0].0;
+    // Nothing selected on Level 1's plan, Properties is the plan's.
+    pick(&mut h, Role::CheckBox, "Section Box");
+    let m = &h.state().session.model;
+    assert_eq!(m.shown_range(level).cut, 1500.0);
+    assert_eq!(m.shown_crop(level), Some([P2(-1000.0, -1000.0), P2(4000.0, 7000.0)]));
+}

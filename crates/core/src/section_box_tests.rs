@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use crate::engine::Session;
+use crate::geom::P2;
 use crate::graphics::Look;
 use crate::render::Rgb;
 use crate::view3d::{AZIMUTH, Camera, ELEVATION, Image, Scene, gpu};
@@ -215,4 +216,99 @@ fn a_section_box_leaves_out_the_levels_it_doesnt_reach() {
     run(&mut s, "section_box", json!({"min": [-1000, -1000, -500], "max": [5000, 1000, 1500]}));
     let shown = picture(&s, &cam).shows();
     assert!(shown.contains(&levels[0]) && !shown.contains(&levels[1]), "Level 2, at 3 m, is above the box");
+}
+
+// ---------- plans that follow the box ----------
+
+use crate::render;
+
+/// Metres: three patches 2 m square, one over the other, red on the floor, green a metre up and blue two metres up; the green
+/// one runs 2 m further east.
+fn stack() -> String {
+    let mut text = String::new();
+    for (z, w, [r, g, b]) in [(0.0, 2.0, [255, 0, 0]), (1.0, 4.0, [0, 200, 0]), (2.0, 2.0, [0, 0, 255])] {
+        for i in 0..=(w * 50.0) as i32 {
+            for k in 0..=100 {
+                text += &format!("{} {} {z} {r} {g} {b}\n", f64::from(i) * 0.02, f64::from(k) * 0.02);
+            }
+        }
+    }
+    text
+}
+
+fn green(c: Rgb) -> bool {
+    c.0 < 60 && c.1 > 150 && c.2 < 60
+}
+
+/// How many pixels of plan `level`'s picture, 400 by 300, fitted to `fit`'s, are `colour`'s.
+fn in_plan(s: &Session, level: u64, colour: impl Fn(Rgb) -> bool) -> usize {
+    let d = render::plan(&s.model, level, 400, 300);
+    let pm = tiny_skia::Pixmap::decode_png(&render::png(&d).unwrap()).unwrap();
+    pm.pixels().iter().map(|p| p.demultiply()).filter(|p| colour(Rgb(p.red(), p.green(), p.blue()))).count()
+}
+
+/// The stack placed with its south-west corner on the origin and its foot on Level 1, and Level 1's plan seeing all of it.
+fn stacked(test: &str) -> (Session, u64) {
+    let mut s = Session::new();
+    run(&mut s, "point_cloud", json!({"path": scan(test, &stack()), "origin": "file"}));
+    let level = s.model.levels()[0].0;
+    run(&mut s, "modify", json!({"id": level, "view_range": {"top": 3000, "cut": 2500, "bottom": 0, "depth": 0}}));
+    (s, level)
+}
+
+#[test]
+fn a_plan_that_follows_the_section_box_shows_what_it_keeps() {
+    let (mut s, level) = stacked("plan");
+    // Seen from above, the blue patch hides the others where they lie under it; the green one shows east of it.
+    assert!(in_plan(&s, level, blue) > 1000 && in_plan(&s, level, green) > 1000);
+    run(&mut s, "section_box", json!({"min": [-500, -500, 500], "max": [3000, 2500, 1500]}));
+    assert!(in_plan(&s, level, blue) > 1000, "the box changes a plan only once the plan follows it");
+    run(&mut s, "modify", json!({"id": level, "section_box": true}));
+    // Its heights are the plan's range now: only the green patch, a metre up, is between them; and its sides crop it.
+    assert_eq!((in_plan(&s, level, blue), in_plan(&s, level, red)), (0, 0));
+    let cropped = in_plan(&s, level, green);
+    assert!(cropped > 1000, "{cropped}");
+    let range = s.model.shown_range(level);
+    assert_eq!((range.cut, range.bottom, range.depth), (1500.0, 500.0, 500.0));
+    assert_eq!(s.model.plan_range(level).cut, 2500.0, "the plan's own view range is as it was");
+    assert_eq!(s.model.shown_crop(level), Some([P2(-500.0, -500.0), P2(3000.0, 2500.0)]));
+    // A crop of its own and the box's sides: what both keep.
+    run(&mut s, "modify", json!({"id": level, "crop": [[1000, 0], [5000, 5000]]}));
+    assert_eq!(s.model.shown_crop(level), Some([P2(1000.0, 0.0), P2(3000.0, 2500.0)]));
+    // The box turned off, the plan is as its own range says.
+    run(&mut s, "section_box", json!({"on": false}));
+    assert_eq!(s.model.shown_range(level).cut, 2500.0);
+    assert_eq!(s.model.shown_crop(level), Some([P2(1000.0, 0.0), P2(5000.0, 5000.0)]));
+}
+
+#[test]
+fn a_plan_following_the_box_snaps_to_a_scan_at_the_boxs_top() {
+    let (mut s, level) = stacked("snap");
+    run(&mut s, "section_box", json!({"min": [-500, -500, 500], "max": [5000, 2500, 1000]}));
+    run(&mut s, "modify", json!({"id": level, "section_box": true}));
+    // Green points are a metre up, where the box's top cuts: a click near one lands on it.
+    let f = crate::snap::snap(
+        &s.model,
+        level,
+        P2(3010.0, 1010.0),
+        crate::snap::Reach { point: 100.0, line: 50.0 },
+        &[],
+        false,
+        &Default::default(),
+    );
+    assert_eq!(f.kind, crate::snap::Kind::Point, "{f:?}");
+}
+
+#[test]
+fn a_dependent_view_follows_the_box_as_its_parent_does_and_the_flag_is_saved() {
+    let (mut s, level) = stacked("dependent");
+    run(&mut s, "section_box", json!({"min": [-500, -500, 500], "max": [3000, 2500, 1500]}));
+    let view = run(&mut s, "duplicate_view", json!({"view": level}))["id"].as_u64().unwrap();
+    let dependent = run(&mut s, "duplicate_view", json!({"view": view, "mode": "dependent"}))["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": view, "section_box": true}));
+    assert_eq!(s.model.shown_range(dependent).cut, 1500.0);
+    assert_eq!(s.model.shown_range(level).cut, 2500.0, "the level's own plan doesn't follow it");
+    let back = crate::model::Model::read(&s.model.to_json().unwrap()).unwrap().0;
+    assert_eq!(back.shown_range(view).cut, 1500.0);
+    assert!(s.execute("modify", &json!({"id": view, "section_box": "yes"})).is_err());
 }

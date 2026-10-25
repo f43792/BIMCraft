@@ -70,6 +70,11 @@ left out, and the rest are cut to its sides. A section's picture has its own cli
 `Mesh::new` refuses a boxed view, and the processor draws it. Its grips are the core's: `box_grips` (the middle of each face: west,
 east, south, north, bottom, top), `box_edges`, `move_box_face` (a face moved along its axis to 10 mm, stopping short of the face across
 from it) and `Camera::along` (how far, mm, a drag on the picture moves a point along an axis; none for an axis pointing at the camera).
+A plan may follow the box (`section_box` on a `Level` or a `PlanView`, set by `modify`; a dependent view follows its parent's,
+`Model::plan_box`; Duplicate View copies it): while the default 3D view's box is on, the plan shows what the box keeps, its range
+from the box's bottom up to its top, where it cuts (`Model::shown_range`), and its crop the box's sides, within its own crop if it has
+one (`Model::shown_crop`). What a plan draws and snaps to reads those; `plan_range` and `crop_of` stay the plan's own, which commands
+(dimensions, joins, Duplicate View) and Properties use. A ceiling plan keeps its own range.
 
 The 3D view can be drawn on the graphics card (File > Settings > Performance; off until asked for: `BimApp::card`, `settings.json`'s
 `gpu_3d`). `view3d::gpu::Mesh` is the triangles a view shows as f32 vertices relative to the middle of what is drawn (millimetres far

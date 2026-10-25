@@ -4524,9 +4524,9 @@ fn duplicate_view(s: &mut Session, p: &Value) -> R {
     };
     // What it starts as: the settings the source is drawn with, a dependent's being its parent's.
     let held = m.elements.get(m.plan_source(view));
-    let (view_range, graphics) = match held {
-        Some(Element::Level(l)) => (l.view_range, l.graphics.clone()),
-        Some(Element::PlanView(v)) => (v.view_range, v.graphics.clone()),
+    let (view_range, graphics, section_box) = match held {
+        Some(Element::Level(l)) => (l.view_range, l.graphics.clone(), l.section_box),
+        Some(Element::PlanView(v)) => (v.view_range, v.graphics.clone(), v.section_box),
         _ => Default::default(),
     };
     let dependent = mode == "dependent";
@@ -4537,6 +4537,7 @@ fn duplicate_view(s: &mut Session, p: &Value) -> R {
         crop: m.crop_of(view),
         graphics: if dependent { Graphics::default() } else { graphics },
         parent: dependent.then_some(source),
+        section_box: section_box && !dependent,
     };
     // With detailing, what is annotated in the source itself (not in its parent) is copied into the new view.
     let notes: Vec<Element> =
