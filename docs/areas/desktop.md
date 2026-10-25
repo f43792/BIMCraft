@@ -107,5 +107,22 @@ Undo's list. The arrows beside Undo and Redo (`BimApp::steps_list`) list `Sessio
 undo snapshot: the command's label and the elements it made and took away, by category, which `step_name` turns into Create Walls
 or Delete Door (else the label). A click runs `undo` or `redo` with `count`.
 
-Tabs. The open ribbon tab and the open view tab mould out of what they open: `rule_under_tabs` draws the rule under a row of tabs
-but for the open one, whose sides run down into the surface below. A view's × is part of its tab (`tab_button_with`'s `room`).
+Tabs. Ribbon and view tabs are pills (`tab_button_with`): the open one in the accent's soft tint, a contextual one solid green
+when open and tinted green when not. A view's × is part of its tab (`tab_button_with`'s `room`). The ribbon's tab row scrolls
+sideways with the wheel in a window too narrow for it.
+
+The look (fork issue 2, after SolidCraft's). `style.rs` holds the tokens: the palettes, light and dark, with a dark app bar; the
+card frame (`style::card`: 8 px corners, a hairline border and a soft shadow, standing `GAP` off the edges it's told to); IBM Plex Sans
+and Mono (`assets/fonts`, SIL OFL 1.1), with `style::semibold` for titles and tabs (the body's face until the window has loaded it, a
+frame after `apply`). `BimApp::show` paints the active view's ground (`backdrop`) under everything, then the app bar (Home, File, the
+Quick Access Toolbar and the title, light on dark, `style::on_app_bar`), and the ribbon, the Options Bar, the status bar and each docked
+palette stack as cards, so the gaps between them read as the view going on beneath; the view control bar is a small card in the view's
+corner. The Options Bar is always there (Modify, greyed, when there's nothing to set), so the view never moves under a drag when a
+selection fills it. File > Settings > Layout picks Floating (the cards) or Compact (`BimApp::compact`, kept in `settings.json` as
+`layout`): the same pieces flush to the edges and square, `style::gap` and `style::card` reading it each frame (`style::follow`).
+
+The ribbon's panels (`ribbon.rs`). A panel's name, under its tools, is a button (named `Build ▾` for screen readers) whose list
+(`ribbon::list`) draws the same tools again as rows: `ribbon::listing` turns `big_button` and `small_button` into `list_row`. A tab too
+wide for the window makes room from the right, on the last frame's widths (`ribbon::tab`, `ribbon::fits`): a panel hands its last tools
+over to its list (`ribbon::handed_over`: counted, not drawn), and when one tool left isn't room enough it folds to one button that lists
+them all, and the panel before it is asked; what still doesn't fit scrolls sideways.

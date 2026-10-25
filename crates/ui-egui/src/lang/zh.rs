@@ -1487,6 +1487,11 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["As the System", "跟随系统"],
     ["Light", "浅色"],
     ["Dark", "深色"],
+    ["Layout", "布局"],
+    ["Floating", "浮动"],
+    ["Compact", "紧凑"],
+    ["The ribbon, the palettes and the bars as cards floating over the view", "功能区、选项板和工具栏以卡片形式浮在视图上方"],
+    ["The ribbon, the palettes and the bars flush to the window's edges", "功能区、选项板和工具栏紧贴窗口边缘"],
     ["Ribbon", "功能区"],
     ["Minimize the ribbon to its tabs", "将功能区最小化为选项卡"],
     [
