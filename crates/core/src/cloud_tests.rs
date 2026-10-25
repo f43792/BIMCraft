@@ -351,3 +351,89 @@ fn the_graphics_card_leaves_a_view_with_a_scan_to_the_processor() {
     run(&mut s, "graphics", json!({"view": "{3D}", "hide_elements": [id]}));
     assert!(gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).is_ok());
 }
+
+// ---------- plans and sections ----------
+
+use crate::geom::P2;
+use crate::render;
+
+/// A scan of floors seen from above, metres: two red patches 2 m square half a metre up, at the origin and 4 m north-east of
+/// it, and a blue one 2 m up over the first.
+fn floors() -> String {
+    let mut text = String::new();
+    for (x0, y0, z, [r, g, b]) in [(0.0, 0.0, 0.5, [255, 0, 0]), (4.0, 4.0, 0.5, [255, 0, 0]), (0.0, 0.0, 2.0, [0, 0, 255])] {
+        for i in 0..=100 {
+            for k in 0..=100 {
+                text += &format!("{} {} {z} {r} {g} {b}\n", x0 + f64::from(i) * 0.02, y0 + f64::from(k) * 0.02);
+            }
+        }
+    }
+    text
+}
+
+fn blue(c: Rgb) -> bool {
+    c.0 < 60 && c.1 < 60 && c.2 > 200
+}
+
+/// How many pixels of a drawing's PNG are `colour`'s.
+fn drawn(d: &render::Drawing, colour: impl Fn(Rgb) -> bool) -> usize {
+    let pm = tiny_skia::Pixmap::decode_png(&render::png(d).unwrap()).unwrap();
+    pm.pixels().iter().map(|p| p.demultiply()).filter(|p| colour(Rgb(p.red(), p.green(), p.blue()))).count()
+}
+
+#[test]
+fn a_plan_shows_what_of_a_scan_lies_in_its_view_range_and_picks_it_where_its_points_are() {
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("plan", "floors.xyz", &floors()), "origin": "file"}))["id"].as_u64().unwrap();
+    let levels = run(&mut s, "elements", json!({"category": "level"}));
+    let level = |n: usize| levels["elements"][n]["id"].as_u64().unwrap();
+    // Level 1 cuts at 1200 and sees down to the level: the red patches, not the blue one over them.
+    let d = render::plan(&s.model, level(0), 600, 600);
+    let (reds, blues) = (drawn(&d, red), drawn(&d, blue));
+    assert!(reds > 3000 && blues == 0, "{reds} {blues}");
+    let at = |q: P2| d.view.px(q);
+    assert_eq!((d.pick(at(P2(1000.0, 1000.0)), 3.0), d.pick(at(P2(5000.0, 5000.0)), 3.0)), (Some(id), Some(id)));
+    // Between the patches there are no points to pick.
+    assert_eq!(d.pick(at(P2(3000.0, 3000.0)), 3.0), None);
+    assert!(d.in_box(at(P2(-500.0, 6500.0)), at(P2(6500.0, -500.0)), false).contains(&id));
+    // A plan whose range is above it shows none of it.
+    let up = render::plan(&s.model, level(1), 600, 600);
+    assert!(!up.owners.contains(&Some(id)));
+    // Written out, it's a picture: in the SVG, and in a PDF with what isn't a point left clear.
+    assert!(render::svg(&d).contains("<image"));
+    let pdf = crate::pdf::pdf(&[(&d, P2(200.0, 200.0))]);
+    assert!(pdf.windows(6).any(|w| w == b"/SMask"));
+    // The view colours it, or hides it.
+    run(&mut s, "graphics", json!({"view": "Level 1", "elements": {id.to_string(): {"projection": {"fill": [0, 0, 255]}}}}));
+    let d = render::plan(&s.model, level(0), 600, 600);
+    assert_eq!((drawn(&d, red), drawn(&d, blue)), (0, reds));
+    run(&mut s, "graphics", json!({"view": "Level 1", "reset": true, "hide_elements": [id]}));
+    assert!(!render::plan(&s.model, level(0), 600, 600).owners.contains(&Some(id)));
+}
+
+#[test]
+fn a_section_shows_a_scan_between_its_line_and_its_far_clip() {
+    let mut s = Session::new();
+    let id =
+        run(&mut s, "point_cloud", json!({"path": scan("section", "floors.xyz", &floors()), "origin": "file"}))["id"].as_u64().unwrap();
+    // Looking north from a metre south of the patches, which it sees edge on.
+    let look = |s: &mut Session, depth: Option<f64>| {
+        let mut p = json!({"start": [-1000, -1000], "end": [7000, -1000]});
+        if let Some(d) = depth {
+            p["depth"] = json!(d);
+        }
+        let v = run(s, "section", p)["id"].as_u64().unwrap();
+        let view = render::section_fit(&s.model, v, 600, 400);
+        render::section_image(&s.model, &Scene::new(&s.model), v, view, &[]).unwrap()
+    };
+    let img = look(&mut s, None);
+    let (reds, blues) = (pixels(&img, red), pixels(&img, blue));
+    assert!(reds > 100 && blues > 50, "{reds} {blues}");
+    let (w, h) = (img.width, img.height);
+    let at =
+        (0..h).flat_map(|y| (0..w).map(move |x| (f64::from(x) + 0.5, f64::from(y) + 0.5))).find(|&(x, y)| red(img.color(x, y))).unwrap();
+    assert_eq!(img.pick(at.0, at.1), Some(id));
+    // Its far clip half a metre past its line stops short of them.
+    let img = look(&mut s, Some(500.0));
+    assert_eq!((pixels(&img, red), pixels(&img, blue)), (0, 0));
+}

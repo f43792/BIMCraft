@@ -1,7 +1,7 @@
 # Point clouds
 
-On the roadmap under 0.9 Interoperability. A project holds scans and places them, and the 3D view draws them; plans and
-sections don't yet.
+On the roadmap under 0.9 Interoperability. A project holds scans and places them, and the 3D view, plans and sections draw
+them.
 
 Point clouds (`cloud.rs`) come from public specifications: PTS and XYZ text, PLY (text or either byte order) and ASPRS LAS 1.0
 to 1.4 uncompressed (`Format::from_extension` says why LAZ, E57 and ReCap's RCP/RCS don't). `cloud::read` parses a file twice,
@@ -42,5 +42,14 @@ or the colour the view's projection fill gives. A picture draws at most `DRAWN` 
 that, as Revit's density does. The view fits round its scans, and a level's plane reaches past them (`Model::model_extent`).
 Views hide and override point clouds by element or by the category `pointcloud` (`graphics::SCANS`, apart from `MODEL`:
 Revit has a tab of its own for them in Visibility/Graphics, and Object Styles no row). The graphics card doesn't draw them
-yet: `gpu::Mesh::new` refuses a view that shows one, and the processor draws it. Sections and the wireframe style leave them
-out.
+yet: `gpu::Mesh::new` refuses a view that shows one, and the processor draws it. The wireframe style leaves them out.
+
+A section's or an elevation's picture is the same rasteriser with a `Clip`, and `Scene::dots` keeps a point as `raster` keeps a
+pixel: between the line and the far clip, inside the crop. A plan draws what its view range sees, from the cut plane down to
+the view depth (`render::scans`, under everything else), from above: each point a dot `DOT` pixels wide in its colour or the
+view's, the highest at each pixel on top, `DRAWN` among the scans as in 3D. Each scan is one `Prim::Image` owned by its
+element, no bigger than its dots and clear between them; a picture picks where it isn't clear (`drawn_near` in `Drawing::pick_all`),
+so a click between a scan's points finds what is there, and a sheet's opaque pictures pick as they did. A PDF masks a picture
+that isn't all there with its alpha (`/SMask`), and an SVG holds it as a PNG. A reflected ceiling plan leaves scans out. The
+desktop's plan canvas loads a drawing's pictures as textures once for as long as it is shown (`PlanCache::pictures`) and, on a
+dark canvas, dims them so the lightened ink over them still reads.

@@ -820,10 +820,10 @@ impl Scan {
 pub const DRAWN: usize = 2_000_000;
 
 /// How wide a point is drawn, px.
-const DOT: usize = 2;
+pub(crate) const DOT: usize = 2;
 
 /// Which of `total` points a picture draws: every one of so many.
-fn every(total: usize) -> usize {
+pub(crate) fn every(total: usize) -> usize {
     total.div_ceil(DRAWN).max(1)
 }
 
@@ -1248,11 +1248,11 @@ impl Scene {
         }
     }
 
-    /// The points of the scans `keep` takes, drawn into `depth` and `hit` as dots [`DOT`] wide where they are nearer than what
-    /// is there, no more than [`DRAWN`] of them; each pixel's colour, which is none where no scan is kept.
+    /// The points of the scans `keep` takes that `clip` keeps, drawn into `depth` and `hit` as dots [`DOT`] wide where they are
+    /// nearer than what is there, no more than [`DRAWN`] of them; each pixel's colour, which is none where no scan is kept.
     fn dots(
         &self,
-        cam: &Camera,
+        (cam, clip): (&Camera, Option<&Clip>),
         (w, h): (usize, usize),
         keep: impl Fn(&Scan) -> bool,
         plain: bool,
@@ -1271,6 +1271,11 @@ impl Scene {
             let slot = (self.tris.len() + n) as u32;
             for (i, p) in scan.points.iter().enumerate().step_by(step) {
                 let (x, y, z) = cam.project(scan.place(*p));
+                if clip.is_some_and(|k| {
+                    z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
+                }) {
+                    continue;
+                }
                 let (x0, y0) = ((x - half).round(), (y - half).round());
                 if !(x0 > -(DOT as f64) && y0 > -(DOT as f64) && x0 < w as f64 && y0 < h as f64 && z.is_finite()) {
                     continue;
@@ -1331,10 +1336,10 @@ impl Scene {
         let mut curve_lit = vec![0.0; w * h];
         let opaque = |t: &Tri| shown(t) && !see_through(t);
         self.raster((cam, clip), (w, h), opaque, None, &corner_light, (&mut depth, &mut hit, &mut curve_lit));
-        // The scans' points, each a dot in its colour where nothing opaque is nearer (not in a section's picture yet). A pixel a
-        // point shows holds its scan's slot, after the triangles', and the point's colour.
+        // The scans' points, each a dot in its colour where nothing opaque is nearer; in a section's picture, those between its
+        // line and its far clip. A pixel a point shows holds its scan's slot, after the triangles', and the point's colour.
         let first = self.tris.len();
-        let dots = self.dots(cam, (w, h), |s| clip.is_none() && (plain || look.shows(s.owner)), plain, look, (&mut depth, &mut hit));
+        let dots = self.dots((cam, clip), (w, h), |s| plain || look.shows(s.owner), plain, look, (&mut depth, &mut hit));
         // Only a picture with something in it to see through needs the second pass, and its buffers.
         let through_any = !plain && self.tris.iter().any(|t| shown(t) && see_through(t));
         let (mut seen, mut seen_lit, mut near) = (Vec::new(), Vec::new(), Vec::new());
