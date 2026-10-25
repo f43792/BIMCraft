@@ -1588,6 +1588,15 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Building information modelling, open and free.", "开放、免费的建筑信息模型。"],
     ["Home", "主页"],
     ["Legends are coming in a later version.", "图例功能将在后续版本中推出。"],
+    ["Section Box", "剖面框"],
+    [
+        "Section Box: cut the 3D view to a box, each face moved by its grip in the view or typed here (BX)",
+        "剖面框：将三维视图剪切到一个框内，每个面可在视图中拖动其夹点移动，或在此输入 (BX)",
+    ],
+    ["North", "北"],
+    ["South", "南"],
+    ["East", "东"],
+    ["West", "西"],
 ];
 
 /// The core's words (`bimcraft_core::language`) that the window shows too, in English and Simplified Chinese: after [`WORDS`], which wins.

@@ -135,6 +135,9 @@ impl Mesh {
         if look.style() != VisualStyle::Shaded {
             return Err("hidden line or wireframe".into());
         }
+        if look.section_box().is_some() {
+            return Err("a section box, which only the processor cuts yet".into());
+        }
         let plain = look.is_plain();
         if scene.scans.iter().any(|s| plain || look.shows(s.owner)) {
             return Err("a point cloud, which only the processor draws yet".into());

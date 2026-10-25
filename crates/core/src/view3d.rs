@@ -1000,7 +1000,7 @@ impl Scene {
     /// `lights` says how lit a triangle's corners are (a curve's), its pixels take the blend of the three.
     fn raster(
         &self,
-        (cam, clip): (&Camera, Option<&Clip>),
+        (cam, clip, cut): (&Camera, Option<&Clip>, Option<&Boxed>),
         (w, h): (usize, usize),
         keep: impl Fn(&Tri) -> bool,
         front: Option<&[f32]>,
@@ -1026,7 +1026,7 @@ impl Scene {
         let mut tris = Vec::new();
         let mut bins = vec![Vec::new(); h.div_ceil(ROWS)];
         for (i, t) in self.tris.iter().enumerate() {
-            if !keep(t) {
+            if !keep(t) || cut.is_some_and(|k| k.misses(t)) {
                 continue;
             }
             let [a, b, c] = t.p.map(project);
@@ -1065,7 +1065,8 @@ impl Scene {
                         let z = wa * a.2 + wb * b.2 + wc * c.2;
                         if clip.is_some_and(|k| {
                             z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
-                        }) {
+                        }) || cut.is_some_and(|k| !k.keeps(x, y, z))
+                        {
                             continue;
                         }
                         let z = z as f32;
@@ -1110,7 +1111,7 @@ impl Scene {
     #[cfg(test)]
     fn raster_reference(
         &self,
-        (cam, clip): (&Camera, Option<&Clip>),
+        (cam, clip, cut): (&Camera, Option<&Clip>, Option<&Boxed>),
         (w, h): (usize, usize),
         keep: impl Fn(&Tri) -> bool,
         front: Option<&[f32]>,
@@ -1118,7 +1119,7 @@ impl Scene {
         (depth, hit, lit): (&mut [f32], &mut [u32], &mut [f32]),
     ) {
         for (i, t) in self.tris.iter().enumerate() {
-            if !keep(t) {
+            if !keep(t) || cut.is_some_and(|k| k.misses(t)) {
                 continue;
             }
             let [a, b, c] = t.p.map(|p| cam.project(p));
@@ -1146,7 +1147,8 @@ impl Scene {
                     let z = wa * a.2 + wb * b.2 + wc * c.2;
                     if clip.is_some_and(|k| {
                         z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
-                    }) {
+                    }) || cut.is_some_and(|k| !k.keeps(x, y, z))
+                    {
                         continue;
                     }
                     let z = z as f32;
@@ -1212,6 +1214,7 @@ impl Scene {
                     continue;
                 };
                 let Rgb(r, g, bl) = tints.get(&owner).copied().unwrap_or_else(|| look.edge(owner, EDGE));
+                let Some([a, b]) = look.section_box().map_or(Some([a, b]), |bx| within(a, b, bx)) else { continue };
                 let (pa, pb) = (cam.project(a), cam.project(b));
                 if ![pa.0, pa.1, pb.0, pb.1].iter().all(|x| x.is_finite()) {
                     continue;
@@ -1252,7 +1255,7 @@ impl Scene {
     /// nearer than what is there, no more than [`DRAWN`] of them; each pixel's colour, which is none where no scan is kept.
     fn dots(
         &self,
-        (cam, clip): (&Camera, Option<&Clip>),
+        (cam, clip, cut): (&Camera, Option<&Clip>, Option<&Boxed>),
         (w, h): (usize, usize),
         keep: impl Fn(&Scan) -> bool,
         plain: bool,
@@ -1270,7 +1273,11 @@ impl Scene {
         for (n, scan) in kept {
             let slot = (self.tris.len() + n) as u32;
             for (i, p) in scan.points.iter().enumerate().step_by(step) {
-                let (x, y, z) = cam.project(scan.place(*p));
+                let at = scan.place(*p);
+                if cut.is_some_and(|k| !k.holds(at)) {
+                    continue;
+                }
+                let (x, y, z) = cam.project(at);
                 if clip.is_some_and(|k| {
                     z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
                 }) {
@@ -1335,11 +1342,14 @@ impl Scene {
         let mut hit = vec![u32::MAX; w * h];
         let mut curve_lit = vec![0.0; w * h];
         let opaque = |t: &Tri| shown(t) && !see_through(t);
-        self.raster((cam, clip), (w, h), opaque, None, &corner_light, (&mut depth, &mut hit, &mut curve_lit));
+        // A 3D view's section box keeps what lies inside it; a section has its own clip.
+        let cut = look.section_box().filter(|_| clip.is_none()).map(|b| Boxed::new(cam, b));
+        let cut = cut.as_ref();
+        self.raster((cam, clip, cut), (w, h), opaque, None, &corner_light, (&mut depth, &mut hit, &mut curve_lit));
         // The scans' points, each a dot in its colour where nothing opaque is nearer; in a section's picture, those between its
         // line and its far clip. A pixel a point shows holds its scan's slot, after the triangles', and the point's colour.
         let first = self.tris.len();
-        let dots = self.dots((cam, clip), (w, h), |s| plain || look.shows(s.owner), plain, look, (&mut depth, &mut hit));
+        let dots = self.dots((cam, clip, cut), (w, h), |s| plain || look.shows(s.owner), plain, look, (&mut depth, &mut hit));
         // Only a picture with something in it to see through needs the second pass, and its buffers.
         let through_any = !plain && self.tris.iter().any(|t| shown(t) && see_through(t));
         let (mut seen, mut seen_lit, mut near) = (Vec::new(), Vec::new(), Vec::new());
@@ -1347,7 +1357,7 @@ impl Scene {
             near = vec![f32::NEG_INFINITY; w * h];
             (seen, seen_lit) = (vec![u32::MAX; w * h], vec![0.0; w * h]);
             let clear = |t: &Tri| shown(t) && see_through(t);
-            self.raster((cam, clip), (w, h), clear, Some(&depth), &corner_light, (&mut near, &mut seen, &mut seen_lit));
+            self.raster((cam, clip, cut), (w, h), clear, Some(&depth), &corner_light, (&mut near, &mut seen, &mut seen_lit));
         }
         // How lit each triangle is, as its face turns to the light; and its flat colour, which a section's is the paper's.
         let light: Vec<f64> = self
@@ -1453,7 +1463,17 @@ impl Scene {
         if clip.is_none() {
             let slack = 1.5 / cam.scale.max(1e-9);
             let color = |id: Id| (plain || look.shows(id)).then(|| tints.get(&id).map_or((look.edge(id, DATUM), false), |c| (*c, true)));
-            for marks in level_marks(&self.levels, cam, &color) {
+            // A section box leaves out a level whose plane is above or below it, and cuts the rest to its sides.
+            let levels: Vec<(Id, String, [P3; 4])> = match cut {
+                Some(k) => self
+                    .levels
+                    .iter()
+                    .filter(|(.., c)| (k.lo[2]..=k.hi[2]).contains(&c[0][2]))
+                    .map(|(id, name, c)| (*id, name.clone(), c.map(|p| [p[0].clamp(k.lo[0], k.hi[0]), p[1].clamp(k.lo[1], k.hi[1]), p[2]])))
+                    .collect(),
+                None => self.levels.clone(),
+            };
+            for marks in level_marks(&levels, cam, &color) {
                 let (c, slot) = (marks.color, owners.len() as u32);
                 owners.push(marks.id);
                 let mut paint = |k: usize| {
@@ -1597,6 +1617,97 @@ pub struct Clip {
     pub y: (f64, f64),
 }
 
+/// A 3D view's section box as `cam` sees it: what of a pixel's depth, or of the model, it keeps. The view is square on, so the
+/// model point a pixel shows at a depth is the same sum for every pixel.
+pub(crate) struct Boxed {
+    lo: P3,
+    hi: P3,
+    /// The model point at pixel (0, 0) at depth 0, and how far it moves for a pixel across, a pixel down and a mm nearer.
+    o: P3,
+    dx: P3,
+    dy: P3,
+    dz: P3,
+}
+
+impl Boxed {
+    fn new(cam: &Camera, (lo, hi): (P3, P3)) -> Boxed {
+        let (back, right, up) = cam.axes();
+        let k = 1.0 / cam.scale.max(1e-12);
+        let (w, h) = (f64::from(cam.width) / 2.0, f64::from(cam.height) / 2.0);
+        let o = add(cam.target, sub(mul(up, h * k), mul(right, w * k)));
+        Boxed { lo, hi, o, dx: mul(right, k), dy: mul(up, -k), dz: back }
+    }
+
+    /// Whether model point `p` lies in the box.
+    fn holds(&self, p: P3) -> bool {
+        (0..3).all(|i| p[i] >= self.lo[i] && p[i] <= self.hi[i])
+    }
+
+    /// Whether what pixel `(x, y)` shows at depth `z` lies in the box.
+    fn keeps(&self, x: f64, y: f64, z: f64) -> bool {
+        self.holds(std::array::from_fn(|i| self.o[i] + self.dx[i] * x + self.dy[i] * y + self.dz[i] * z))
+    }
+
+    /// Whether triangle `t` lies wholly outside one of the box's planes, so none of it is kept.
+    fn misses(&self, t: &Tri) -> bool {
+        (0..3).any(|i| t.p.iter().all(|p| p[i] < self.lo[i]) || t.p.iter().all(|p| p[i] > self.hi[i]))
+    }
+}
+
+/// The middle of each face of section box `(lo, hi)`, where its grips are: west, east, south, north, bottom and top.
+pub fn box_grips((lo, hi): (P3, P3)) -> [P3; 6] {
+    let mid: P3 = std::array::from_fn(|i| (lo[i] + hi[i]) / 2.0);
+    std::array::from_fn(|k| {
+        let mut p = mid;
+        p[k / 2] = if k.is_multiple_of(2) { lo[k / 2] } else { hi[k / 2] };
+        p
+    })
+}
+
+/// The twelve edges of section box `(lo, hi)`.
+pub fn box_edges((lo, hi): (P3, P3)) -> Vec<[P3; 2]> {
+    let corner = |n: usize| -> P3 { std::array::from_fn(|i| if n >> i & 1 == 0 { lo[i] } else { hi[i] }) };
+    (0..8).flat_map(|n| (0..3).filter(move |i| n >> i & 1 == 0).map(move |i| [corner(n), corner(n | 1 << i)])).collect()
+}
+
+/// Section box `b` with face `k` (as [`box_grips`] orders them) moved `by` mm along its axis, to 10 mm, stopping
+/// [`MIN_SECTION_BOX`](crate::model::MIN_SECTION_BOX) short of the face across from it.
+pub fn move_box_face((mut lo, mut hi): (P3, P3), k: usize, by: f64) -> (P3, P3) {
+    let (i, gap) = (k / 2 % 3, crate::model::MIN_SECTION_BOX);
+    let round = |v: f64| (v / 10.0).round() * 10.0;
+    if by.is_finite() {
+        if k.is_multiple_of(2) {
+            lo[i] = round(lo[i] + by).min(hi[i] - gap);
+        } else {
+            hi[i] = round(hi[i] + by).max(lo[i] + gap);
+        }
+    }
+    (lo, hi)
+}
+
+/// What of the line from `a` to `b` lies within the box from `lo` to `hi`, if any (Liang and Barsky's clipping).
+fn within(a: P3, b: P3, (lo, hi): (P3, P3)) -> Option<[P3; 2]> {
+    let d = sub(b, a);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for i in 0..3 {
+        for (p, q) in [(-d[i], a[i] - lo[i]), (d[i], hi[i] - a[i])] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+            }
+        }
+    }
+    (t0 <= t1).then(|| [add(a, mul(d, t0)), add(a, mul(d, t1))])
+}
+
 /// Where `pts` lie as `cam` looks at them: the point in their middle, and how far they spread
 /// across the picture and up it, mm.
 fn extent(cam: &Camera, pts: &[P3]) -> Option<(P3, f64, f64)> {
@@ -1721,6 +1832,17 @@ impl Camera {
         zoomed.pan(zoomed.project_xy(p), at)
     }
 
+    /// How far, mm, a drag on the picture from pixel `from` to pixel `to` moves a point along the model's axis `axis` (0 for
+    /// x, 1 for y, 2 for z): the drag's part along that axis as the picture shows it. None where the axis points at the camera.
+    pub fn along(&self, axis: usize, from: (f64, f64), to: (f64, f64)) -> Option<f64> {
+        let unit: P3 = std::array::from_fn(|i| if i == axis { 1.0 } else { 0.0 });
+        let (o, e) = (self.project_xy([0.0; 3]), self.project_xy(unit));
+        let (dx, dy) = (e.0 - o.0, e.1 - o.1);
+        let shown = dx * dx + dy * dy;
+        // Less than a twentieth of a pixel for 100 m: square to the picture.
+        (axis < 3 && shown > (0.05 / 1e5f64).powi(2)).then(|| ((to.0 - from.0) * dx + (to.1 - from.1) * dy) / shown)
+    }
+
     fn project_xy(&self, p: P3) -> (f64, f64) {
         let (x, y, _) = self.project(p);
         (x, y)
@@ -1837,8 +1959,8 @@ mod tests {
                     let (mut rd, mut rh, mut rl) = buffers();
                     let keep = |t: &Tri| !t.owner.is_multiple_of(3);
                     let light = |i| Some([0.65 + (i % 7) as f64 * 0.01, 0.75, 0.95]);
-                    scene.raster_reference((&cam, clipping), (w, h), keep, front, &light, (&mut rd, &mut rh, &mut rl));
-                    scene.raster((&cam, clipping), (w, h), keep, front, &light, (&mut d, &mut hit, &mut l));
+                    scene.raster_reference((&cam, clipping, None), (w, h), keep, front, &light, (&mut rd, &mut rh, &mut rl));
+                    scene.raster((&cam, clipping, None), (w, h), keep, front, &light, (&mut d, &mut hit, &mut l));
                     assert_eq!(d, rd, "depth {w}x{h}");
                     assert_eq!(hit, rh, "picking {w}x{h}");
                     assert_eq!(l, rl, "lighting {w}x{h}");

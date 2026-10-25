@@ -57,6 +57,20 @@ new drawing of what a view cuts sets `Part::Cut`; a hidden door's opening is dra
 Instances and the framing of sections and 3D views take what `Look` shows too. A level's ceiling plan is its plan's view;
 transparency shows in 3D only.
 
+A 3D view may be cut to a section box (fork issue 1), as Revit's Section Box: `View3D::section_box`, a `SectionBox` of six planes
+square to the axes from `min` to `max`, `on` or off (off, it keeps its extents), set by the `section_box` command (which makes the
+default 3D view, as `graphics` does, and with no extents fits the box round `Model::model_box`, `SECTION_BOX_ROOM` clear of it), and
+checked in `Model::check` (usable numbers, `MIN_SECTION_BOX` between the planes on each axis). `Look::of` carries a view's box while
+it's on (`Look::section_box`; `with_section_box` puts another in, for a box being dragged), and `Scene::picture` cuts to it: the view
+is square on, so `Boxed` turns a pixel and its depth into a model point with one sum, and `raster` keeps a pixel only where that point
+is in the box (a triangle wholly past one plane is passed over first), `dots` a scan's point only where it is, and the wireframe each
+edge as far as it runs inside (`within`, Liang and Barsky's clipping). What it cuts away isn't drawn, so it isn't picked; the edge
+where a cut face meets paper is drawn as any edge is, and cut faces aren't capped yet. A level whose plane is above or below the box is
+left out, and the rest are cut to its sides. A section's picture has its own clip and ignores the box. The card doesn't cut yet:
+`Mesh::new` refuses a boxed view, and the processor draws it. Its grips are the core's: `box_grips` (the middle of each face: west,
+east, south, north, bottom, top), `box_edges`, `move_box_face` (a face moved along its axis to 10 mm, stopping short of the face across
+from it) and `Camera::along` (how far, mm, a drag on the picture moves a point along an axis; none for an axis pointing at the camera).
+
 The 3D view can be drawn on the graphics card (File > Settings > Performance; off until asked for: `BimApp::card`, `settings.json`'s
 `gpu_3d`). `view3d::gpu::Mesh` is the triangles a view shows as f32 vertices relative to the middle of what is drawn (millimetres far
 from the origin would overflow f32), each with its colour, normal, face normal, plane, element and texture; the textures' mip levels as

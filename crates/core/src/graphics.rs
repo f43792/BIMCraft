@@ -660,6 +660,8 @@ pub struct Look {
     hidden: BTreeSet<Id>,
     paint: BTreeMap<Id, Override>,
     style: VisualStyle,
+    /// The section box a 3D view is cut to, its min and max corners, while it's on.
+    section: Option<([f64; 3], [f64; 3])>,
 }
 
 /// `c` halfway to the paper.
@@ -671,7 +673,18 @@ fn halftone(c: Rgb) -> Rgb {
 impl Look {
     /// What view `view` looks like: nothing hidden or painted when it isn't a view, or has no graphics.
     pub fn of(m: &Model, view: impl Key) -> Look {
-        graphics_of(m, view).map_or_else(Look::default, |own| Look::with(m, own))
+        let look = graphics_of(m, view).map_or_else(Look::default, |own| Look::with(m, own));
+        Look { section: m.section_box(view), ..look }
+    }
+
+    /// The section box the view is cut to, its min and max corners: none unless it's a 3D view with one turned on.
+    pub fn section_box(&self) -> Option<([f64; 3], [f64; 3])> {
+        self.section
+    }
+
+    /// This look cut to section box `section` instead: a box being dragged, before its command runs.
+    pub fn with_section_box(self, section: Option<([f64; 3], [f64; 3])>) -> Look {
+        Look { section, ..self }
     }
 
     /// What the default 3D view looks like: as its own view's graphics say once something has changed

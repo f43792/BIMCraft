@@ -38,6 +38,8 @@ pub mod render;
 pub mod runs;
 pub mod sample;
 pub mod schedule;
+#[cfg(test)]
+mod section_box_tests;
 pub mod sheet;
 pub mod skeleton;
 pub mod snap;

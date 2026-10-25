@@ -20,8 +20,8 @@ use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
     Facing, Floor, FloorType, Grid, Guid, Id, Key, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass,
     Model, NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, PlanView, PointCloud, ProjectParameter,
-    RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft,
-    Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, SectionBox,
+    Shaft, Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::paint;
 use crate::phasing;
@@ -833,6 +833,18 @@ pub static ALL: &[Command] = &[
          shows (the project's last unless it says) and `phase_filter` how it shows each status of what's in it (see `phase`); \
          `options` chooses the design option it shows of a set (the set's primary unless it says; see `option`)",
         view_graphics,
+    ),
+    edit(
+        "section_box",
+        "Section Box",
+        &[],
+        "{view?: a 3D view's name or id ({3D} unless given), on?: true | false (true unless given), min?: [x, y, z], max?: \
+         [x, y, z]} the box a 3D view is cut to, as Revit's Section Box: six planes square to the axes, keeping what lies \
+         between `min` and `max` (mm; each at least 10 mm past the other on every axis), the model's surfaces and its point \
+         clouds alike, so a scan's floors and ceilings can be cut away to show its walls. What it cuts away isn't drawn or \
+         picked. A corner not given stays where it was; turned on with none, it's fitted round the model, 300 mm clear of \
+         it. `on: false` turns it off and keeps its extents for when it's turned on again",
+        section_box,
     ),
     edit(
         "filter",
@@ -2235,12 +2247,7 @@ fn view_graphics(s: &mut Session, p: &Value) -> R {
         g.check(&s.model).map_err(|e| bad(c, e))?;
         let v = match view {
             Some(v) => v,
-            None => s.model_mut().insert(Element::View3D(View3D {
-                name: "{3D}".into(),
-                azimuth: view3d::AZIMUTH,
-                elevation: view3d::ELEVATION,
-                graphics: Graphics::default(),
-            })),
+            None => s.model_mut().insert(Element::View3D(View3D::default_view())),
         };
         set_graphics(s.model_mut(), v, g.clone());
         view = Some(v);
@@ -2266,6 +2273,66 @@ fn known_names(names: &[&str]) -> String {
 }
 
 /// View `view`'s graphics, set.
+/// How far a section box fitted round the model stands off it, mm.
+const SECTION_BOX_ROOM: f64 = 300.0;
+
+fn section_box(s: &mut Session, p: &Value) -> R {
+    let c = "section_box";
+    let m = &s.model;
+    let default = absent(p.get("view"))
+        || matches!(p.get("view"), Some(Value::String(n)) if n.eq_ignore_ascii_case("{3D}") || n.eq_ignore_ascii_case("3D"));
+    // The default 3D view is made when its box is first set, as when its graphics first change.
+    let view = if default {
+        m.default_3d()
+    } else {
+        let v = view_param(c, m, p, false)?;
+        if !matches!(m.elements.get(v), Some(Element::View3D(_))) {
+            return Err(bad(c, format!("{} isn't a 3D view; only a 3D view has a section box", view_title(m, v))));
+        }
+        Some(v)
+    };
+    let was = view.and_then(|v| match m.elements.get(v) {
+        Some(Element::View3D(v3)) => v3.section_box,
+        _ => None,
+    });
+    let corner = |key: &str| -> Result<Option<[f64; 3]>, String> {
+        match p.get(key) {
+            v if absent(v) => Ok(None),
+            Some(v) => serde_json::from_value::<[f64; 3]>(v.clone())
+                .map(Some)
+                .map_err(|_| bad(c, format!("`{key}`, a corner of the section box, is [x, y, z] in mm, not {v}"))),
+            None => Ok(None),
+        }
+    };
+    let (min, max) = (corner("min")?, corner("max")?);
+    let on = match p.get("on") {
+        v if absent(v) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => return Err(bad(c, format!("`on` must be true or false, got {v}"))),
+        None => true,
+    };
+    let (min, max) = match (was, min, max) {
+        (_, Some(lo), Some(hi)) => (lo, hi),
+        (Some(b), lo, hi) => (lo.unwrap_or(b.min), hi.unwrap_or(b.max)),
+        (None, lo, hi) => {
+            let (flo, fhi) = m
+                .model_box()
+                .ok_or_else(|| bad(c, "there's nothing in the project to fit a section box round: give its `min` and `max`"))?;
+            let room = |v: [f64; 3], k: f64| v.map(|x| x + k * SECTION_BOX_ROOM);
+            (lo.unwrap_or(room(flo, -1.0)), hi.unwrap_or(room(fhi, 1.0)))
+        }
+    };
+    let b = SectionBox { min, max, on };
+    let v = match view {
+        Some(v) => v,
+        None => s.model_mut().insert(Element::View3D(View3D::default_view())),
+    };
+    if let Some(Element::View3D(v3)) = s.model_mut().elements.get_mut(v) {
+        v3.section_box = Some(b);
+    }
+    Ok(json!({"view": v, "on": b.on, "min": b.min, "max": b.max}))
+}
+
 fn set_graphics(m: &mut Model, view: impl Key, g: Graphics) {
     if let Some(slot) = m.elements.get_mut(view).and_then(graphics::graphics_mut) {
         *slot = g;
@@ -4540,14 +4607,7 @@ fn visual_style(s: &mut Session, p: &Value) -> R {
         |view: Option<Id>, m: &Model| view.and_then(|v| graphics::graphics_of(m, v)).map_or_else(Default::default, |g| g.resolved(m).style);
     let view = match (style, view) {
         (Some(style), view) if style != has(view, m) => {
-            let v = view.unwrap_or_else(|| {
-                s.model_mut().insert(Element::View3D(View3D {
-                    name: "{3D}".into(),
-                    azimuth: view3d::AZIMUTH,
-                    elevation: view3d::ELEVATION,
-                    graphics: Graphics::default(),
-                }))
-            });
+            let v = view.unwrap_or_else(|| s.model_mut().insert(Element::View3D(View3D::default_view())));
             change_graphics(s, v, |g| g.style = style);
             Some(v)
         }
@@ -4631,7 +4691,7 @@ fn place(s: &mut Session, p: &Value) -> R {
                         name: n.clone(),
                         azimuth: num(c, p, "azimuth")?.unwrap_or(view3d::AZIMUTH),
                         elevation: num(c, p, "elevation")?.unwrap_or(view3d::ELEVATION),
-                        graphics: Graphics::default(),
+                        ..View3D::default_view()
                     })),
                     (None, _) => return Err(bad(c, format!("no level, section, elevation, schedule or 3D view named `{n}`"))),
                 }

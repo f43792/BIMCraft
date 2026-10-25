@@ -4876,6 +4876,7 @@ mod objectstyles;
 mod planviews;
 mod purge;
 mod revit;
+mod section_box;
 mod start;
 mod window;
 

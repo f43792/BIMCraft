@@ -854,6 +854,9 @@ impl BimApp {
         // A view's graphics: the template it follows, and its overrides.
         let view_shown = matches!(subject, Subject::Plan(_) | Subject::CeilingPlan | Subject::View3D)
             || (matches!(subject, Subject::Element(_)) && self.selection.is_empty() && matches!(self.sheet, Sheet::Section(_)));
+        if subject == Subject::View3D {
+            self.section_box_properties(ui);
+        }
         if view_shown {
             self.graphics_properties(ui);
             self.phasing_properties(ui);

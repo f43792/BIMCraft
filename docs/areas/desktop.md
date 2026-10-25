@@ -100,6 +100,13 @@ is drawn in plans only (a door's in a box, a window's in a hexagon, any other's 
 with it. The Tag tool picks whatever `anchor` finds a point for, and the Options Bar's Label field is the `label` the click passes on; Tag All (`tag` without `ids`)
 still takes doors and windows unless given a `category`.
 
+The section box (`section_box.rs`). The 3D view's Properties have an Extents group: Section Box, a checkbox, and while it's on the
+West, East, South, North, Bottom and Top faces as lengths in the project's units; BX turns it on or off (opening the 3D view). They run
+`section_box`. In the view, `orbit.rs` draws the box's edges and, in Modify, an arrow on each face pointing out along its axis (a square
+for a face square to the screen); a primary drag from one (`section_box::grip_at`, within `GRIP` points) moves that face by
+`Camera::along` and `move_box_face`, the picture cut to the box as it goes (`Look::with_section_box`, part of the `Shot` it caches), and
+runs `section_box` when the drag ends. The grip takes the drag, not the camera, and a click on a grip picks nothing behind it.
+
 Unhide. Only Reveal Hidden Elements lets what a view hides be picked, so the Modify tab's View panel offers Unhide Element and Unhide Category (EU, VU) for a selection
 `BimApp::hidden_selection` finds the active view hiding: the elements hidden one by one, and the categories hidden whole. They run `graphics` with `show_elements` or `show`
 (`unhide_selection`), the selection stays, and with nothing of it hidden EU opens the Elements tab as before and VU says so.

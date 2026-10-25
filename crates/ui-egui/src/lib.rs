@@ -32,6 +32,7 @@ mod purge;
 pub mod recent;
 pub mod revit;
 mod section;
+mod section_box;
 pub mod settings;
 mod start;
 mod structure;
@@ -257,7 +258,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 43] = [
+const SHORTCUTS: [(&str, &str); 44] = [
     ("MD", "Modify"),
     ("SB", "Floor: Structural"),
     ("MM", "Mirror Pick Axis"),
@@ -301,6 +302,7 @@ const SHORTCUTS: [(&str, &str); 43] = [
     ("HL", "Hidden Line"),
     ("SD", "Shaded"),
     ("KS", "Keyboard Shortcuts"),
+    ("BX", "Section Box"),
 ];
 
 /// Every two-letter shortcut and what it does: the desktop's own, then the commands' aliases.
@@ -1407,6 +1409,10 @@ impl BimApp {
             }
             "DP" => {
                 self.duplicate_plan("duplicate");
+                return true;
+            }
+            "BX" => {
+                self.toggle_section_box();
                 return true;
             }
             "EU" => {

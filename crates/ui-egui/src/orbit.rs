@@ -3,7 +3,8 @@
 //! a hand without a middle button); the middle button pans; the wheel zooms about the cursor. A
 //! click picks the element the picture shows there, and so does a press let go quickly, however
 //! far the hand went with it (`Canvas::quick_press`): the camera it turned goes back. A level
-//! selected alone has a grip at the middle of each edge of its plane, which a drag moves over it.
+//! selected alone has a grip at the middle of each edge of its plane, which a drag moves over it. A section box is drawn
+//! round what it keeps, with a grip on each face in Modify that a drag moves along its axis (`section_box.rs`).
 
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use bimcraft_core::graphics::{Look, VisualStyle};
 use bimcraft_core::model::{Id, Model};
 use bimcraft_core::render::{self, Rgb};
 use bimcraft_core::view3d::gpu::{Hit, Mesh};
-use bimcraft_core::view3d::{AZIMUTH, Camera, ELEVATION, Image, MAX_SIDE, P3, Scene};
+use bimcraft_core::view3d::{AZIMUTH, Camera, ELEVATION, Image, MAX_SIDE, P3, Scene, move_box_face};
 use egui::{
     Align, Color32, ColorImage, Layout, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder,
     pos2, vec2,
@@ -24,8 +25,9 @@ use crate::icons::Icon;
 use crate::style::pal;
 use crate::{BimApp, Status, Tool, icon_button};
 
-/// What a picture is of: the model, the camera, the elements tinted, whether the theme is dark, and whether the card drew it.
-type Shot = (Arc<Model>, Camera, Vec<(Id, Rgb)>, bool, bool);
+/// What a picture is of: the model, the camera, the elements tinted, whether the theme is dark, whether the card drew it, and
+/// the section box it is cut to while one is dragged.
+type Shot = (Arc<Model>, Camera, Vec<(Id, Rgb)>, bool, bool, Option<(P3, P3)>);
 
 /// A model's mesh for the card, or why the card can't draw it.
 type Meshed = (Arc<Model>, Result<Arc<Mesh>, String>);
@@ -70,6 +72,8 @@ pub struct Orbit {
     /// A selected level's grip being dragged: the level, and which edge of its plane (as
     /// `geom::edge_grips` orders them).
     grip: Option<(Id, usize)>,
+    /// A section box's grip being dragged: which face (as `view3d::box_grips` orders them), and where the drag began.
+    boxing: Option<(usize, Pos2)>,
 }
 
 impl Default for Orbit {
@@ -87,6 +91,7 @@ impl Default for Orbit {
             drag: None,
             before: None,
             grip: None,
+            boxing: None,
         }
     }
 }
@@ -214,10 +219,37 @@ impl BimApp {
         {
             moved = Some((id, to));
         }
+        // The section box, while it's on; in Modify a drag from one of its grips moves that face along its axis, and the view
+        // shows the cut as it goes. The command runs when the drag ends.
+        let boxed = Look::of_3d(&model).section_box();
+        if let Some(b) = boxed
+            && modify
+            && o.grip.is_none()
+            && response.drag_started_by(PointerButton::Primary)
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+            && let Some(k) = crate::section_box::grip_at(b, origin, |p| on_screen(&cam, rect, ppp, p))
+        {
+            o.boxing = Some((k, origin));
+        }
+        if boxed.is_none() {
+            o.boxing = None;
+        }
+        let reboxed = match (boxed, o.boxing, latest) {
+            (Some(b), Some((k, from)), Some(now)) => Some(move_box_face(b, k, cam.along(k / 2, px(from), px(now)).unwrap_or(0.0))),
+            _ => None,
+        };
+        let mut boxed_to = None;
+        if response.drag_stopped()
+            && let (Some(_), Some(to)) = (o.boxing.take(), reboxed)
+            && !self.canvas.quick()
+        {
+            boxed_to = Some(to);
+        }
         // The primary button, or Shift and the middle button, orbit, 0.4° a point; the middle
         // button alone pans.
         if response.drag_started()
             && o.grip.is_none()
+            && o.boxing.is_none()
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         {
             o.drag = Some((response.dragged_by(PointerButton::Primary) || shift, origin));
@@ -262,7 +294,7 @@ impl BimApp {
             .chain(hovered.filter(|id| !selection.contains(id)).map(|id| (id, rgb(pal().hover))))
             .collect();
         let dark = crate::style::dark();
-        if !matches!(&o.shown, Some((m, c, t, k, g)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark && *g == mesh.is_some())
+        if !matches!(&o.shown, Some((m, c, t, k, g, b)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark && *g == mesh.is_some() && *b == reboxed)
         {
             // The card's picture, if it makes one; the processor's if not, and if the card fails it for good.
             let mut drawn = false;
@@ -285,6 +317,7 @@ impl BimApp {
             if !drawn {
                 // As the default 3D view says: what it hides, and the colours it draws in.
                 let look = Look::of_3d(&model);
+                let look = if reboxed.is_some() { look.with_section_box(reboxed) } else { look };
                 let image = scene.render_in(&cam, &tints, &look);
                 // The model shaded as ever, on the theme's ground: only the background is paper white.
                 let ground = color(render::PAPER);
@@ -306,7 +339,7 @@ impl BimApp {
                 }
                 o.picker = Some(Picker::Image(image));
             }
-            o.shown = Some((Arc::clone(&model), cam, tints, dark, drawn));
+            o.shown = Some((Arc::clone(&model), cam, tints, dark, drawn, reboxed));
         }
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, color(render::PAPER));
@@ -329,7 +362,14 @@ impl BimApp {
                 p.rect_stroke(r, 1.0, Stroke::new(1.5, pal().accent), StrokeKind::Middle);
             }
         }
+        // The section box's frame, as the held grip would leave it.
+        let screen = |p: P3| on_screen(&cam, rect, ppp, p);
+        if let Some(b) = reboxed.or(boxed) {
+            crate::section_box::draw(&p, &cam, b, modify, o.boxing.map(|(k, _)| k), screen);
+        }
+        // A click on a grip picks nothing behind it.
         let click = response.clicked().then(|| response.interact_pointer_pos()).flatten().or(self.canvas.quick_press());
+        let click = click.filter(|at| !boxed.is_some_and(|b| modify && crate::section_box::grip_at(b, *at, screen).is_some()));
         let clicked = click.map(|at| pick(&o.picker, at).map(|h| h.id));
         // The face of what's clicked, as paint names the faces of an element.
         let face = click.and_then(|at| pick(&o.picker, at).map(|h| h.face).filter(|f| !f.is_empty()));
@@ -348,6 +388,9 @@ impl BimApp {
         self.context_menu(&response);
         if let Some((id, [lo, hi])) = moved {
             self.run("modify", json!({"id": id, "extent": [[lo.0, lo.1], [hi.0, hi.1]]}));
+        }
+        if let Some((lo, hi)) = boxed_to {
+            self.run("section_box", json!({"min": lo, "max": hi}));
         }
         // The navigation bar, at the view's top right: Home (Revit's default orientation), fit, zoom.
         let bar = Rect::from_min_size(rect.right_top() + vec2(-46.0, 14.0), vec2(32.0, 104.0));
