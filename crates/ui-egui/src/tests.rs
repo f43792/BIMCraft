@@ -3048,10 +3048,11 @@ fn walls_drawn_near_an_angle_guide_snap_onto_it_and_turn_exact_corners() {
     key(&mut h, Key::Enter);
     let (a, b) = walls(&h)[0];
     assert!((degrees(a, b) - 30.0).abs() < 1e-3, "{a:?} {b:?}: 30.2° snaps onto 30°");
-    // 20° is no multiple of 15°, so it's free; but 90° from it is exact all the same.
+    // 20° is no multiple of 15°, so it's free; but 90° from it is exact all the same. Below the first, clear of the Options
+    // Bar floating over the view's top.
     tool(&mut h, "Wall");
-    click(&mut h, P2(0.0, 3000.0));
-    click(&mut h, P2(3000.0, 4092.0));
+    click(&mut h, P2(0.0, -3000.0));
+    click(&mut h, P2(3000.0, -1908.0));
     let (p, q) = match &h.state().tool {
         Tool::Wall(chain) => (chain[0], chain[1]),
         t => panic!("{t:?}"),

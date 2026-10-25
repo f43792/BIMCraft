@@ -1111,9 +1111,6 @@ impl BimApp {
             .show(ui, |ui| style::on_app_bar(|| self.quick_access(ui, &view)));
         let card = style::card([true, true, true, false]);
         Panel::top("ribbon").frame(card).show_separator_line(false).show(ui, |ui| self.ribbon(ui));
-        // Always there, so the view doesn't move when a selection or a tool puts something on it.
-        let options = card.inner_margin(Margin::symmetric(10, 3));
-        Panel::top("options").frame(options).show_separator_line(false).show(ui, |ui| self.options(ui));
         if self.has_update_banner() {
             Panel::top("update").frame(Frame::NONE).show_separator_line(false).show(ui, |ui| self.update_banner(ui));
         }
@@ -1132,6 +1129,7 @@ impl BimApp {
             self.view_pane(ui, front);
             self.work = self.pane;
         });
+        self.options_bar(&ctx);
         if self.ribbon_min && self.ribbon_peek {
             self.ribbon_peek(&ctx);
         }
@@ -3122,15 +3120,25 @@ impl BimApp {
     }
 
     /// The Options Bar: the contextual tab's name, then the tool's options.
+    /// The Options Bar, while there's something on it (a contextual tab's name, a tool's options): a card floating over the
+    /// view's top left, so the view never moves when it comes and goes, and taking the clicks that land on it.
+    fn options_bar(&mut self, ctx: &Context) {
+        if self.context().is_none() && matches!(self.tool, Tool::Modify) {
+            return;
+        }
+        let g = f32::from(style::gap());
+        let view = self.view_rect;
+        let frame = style::card([false; 4]).inner_margin(Margin::symmetric(10, 3));
+        Area::new(UiId::new("options-bar")).order(Order::Middle).fixed_pos(view.left_top() + vec2(g, g)).show(ctx, |ui| {
+            // Clear of the view's zoom buttons on the right.
+            ui.set_max_width((view.width() - 2.0 * g - 60.0).max(200.0));
+            frame.show(ui, |ui| self.options(ui));
+        });
+    }
+
     fn options(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.set_min_height(24.0);
-            if self.context().is_none() && matches!(self.tool, Tool::Modify) {
-                // Nothing to set: the tool's name, as Revit's bar is never quite empty.
-                let font = FontId::proportional(13.0);
-                let (r, _) = ui.allocate_exact_size(vec2(80.0, 16.0), Sense::hover());
-                ui.painter().text(r.left_center(), Align2::LEFT_CENTER, t("Modify"), font, pal().muted);
-            }
             if let Some(name) = self.context() {
                 // Painted: the tab already names it for screen readers.
                 let font = FontId::proportional(13.0);
