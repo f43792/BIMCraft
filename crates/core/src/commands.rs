@@ -114,7 +114,12 @@ pub static ALL: &[Command] = &[
         "point_cloud",
         "Point Cloud",
         &[],
-        "{path | cloud, name?, level?, at?: [x, y], offset?, angle?, units?, spacing?, origin?} brings in a laser scan (`path`: PTS, XYZ,          PLY or LAS; `units` of its coordinates mm, cm, m (the default), in or ft; one point kept in each cube `spacing` mm wide) or          places one the project holds again (`cloud`, its name), as an element: its middle on `at` (the origin) and its foot on the          level, or with `origin: file` where its file's coordinates put it; `offset` raises its middle over the level, `angle` turns it.          Returns its id, the scan's name, the points kept and read, and where its middle was in the file",
+        "{path | cloud, name?, level?, at?: [x, y], offset?, angle?, units?, spacing?, origin?} brings in a laser scan (`path`: \
+         PTS, XYZ, PLY or LAS, or a list of the files of one scan's stations, brought in as one; `units` of its coordinates mm, \
+         cm, m (the default), in or ft; one point kept in each cube `spacing` mm wide) or places one the project holds again \
+         (`cloud`, its name), as an element: its middle on `at` (the origin) and its foot on the level, or with `origin: file` \
+         where its file's coordinates put it; `offset` raises its middle over the level, `angle` turns it. Returns its id, the \
+         scan's name, the points kept and read, and where its middle was in the file",
         point_cloud,
     ),
     edit(
@@ -1272,6 +1277,9 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             if let Some(cloud) = m.clouds.get(&pc.cloud) {
                 extra.insert("points".into(), json!(cloud.len()));
                 extra.insert("source".into(), json!(cloud.source()));
+                if !cloud.stations().is_empty() {
+                    extra.insert("stations".into(), json!(cloud.stations()));
+                }
             }
         }
         Element::Wall(w) => {
@@ -1999,7 +2007,7 @@ fn drawn_category(c: &str, given: &str) -> Result<String, String> {
             c,
             format!(
                 "`{given}` isn't a category views draw; there are: {}",
-                graphics::MODEL.iter().chain(&graphics::ANNOTATION).copied().collect::<Vec<_>>().join(", ")
+                graphics::MODEL.iter().chain(&graphics::ANNOTATION).chain(&graphics::SCANS).copied().collect::<Vec<_>>().join(", ")
             ),
         ))
     }
@@ -2857,7 +2865,23 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
     let c = "point_cloud";
     let m = &s.model;
     let level = level_param(c, m, p, "level")?;
-    let (name, scan, new) = match (string(c, p, "path")?, string(c, p, "cloud")?) {
+    let paths: Option<Vec<PathBuf>> = match p.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(one)) => Some(vec![PathBuf::from(one)]),
+        Some(Value::Array(all)) if all.is_empty() => {
+            return Err(bad(c, "`path` is a scan file, or a list of the files of one scan's stations, not an empty list"));
+        }
+        Some(Value::Array(all)) if all.len() > cloud::MAX_STATIONS => {
+            return Err(bad(c, format!("a scan comes from up to {} files, not {}", cloud::MAX_STATIONS, all.len())));
+        }
+        Some(Value::Array(all)) => Some(
+            all.iter()
+                .map(|v| v.as_str().map(PathBuf::from).ok_or_else(|| bad(c, format!("`path` lists files by their paths, not {v}"))))
+                .collect::<Result<_, _>>()?,
+        ),
+        Some(v) => return Err(bad(c, format!("`path` is a scan file, or a list of the files of one scan's stations, not {v}"))),
+    };
+    let (name, scan, new) = match (paths, string(c, p, "cloud")?) {
         (Some(_), Some(_)) => return Err(bad(c, "give `path`, a scan file to bring in, or `cloud`, a scan the project holds; not both")),
         (None, None) => {
             return Err(bad(
@@ -2878,11 +2902,16 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
             })?;
             (n, scan, false)
         }
-        (Some(path), None) => {
-            let path = PathBuf::from(path);
-            let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-            let format = cloud::Format::from_extension(&ext).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
-            let stem = path.file_stem().map_or_else(|| "scan".into(), |s| s.to_string_lossy().chars().take(MAX_TEXT).collect());
+        (Some(paths), None) => {
+            let mut formats = Vec::with_capacity(paths.len());
+            for path in &paths {
+                let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                formats.push(cloud::Format::from_extension(&ext).map_err(|e| bad(c, format!("{}: {e}", path.display())))?);
+            }
+            let stem = paths
+                .first()
+                .and_then(|p| p.file_stem())
+                .map_or_else(|| "scan".into(), |s| s.to_string_lossy().chars().take(MAX_TEXT).collect());
             let name = string(c, p, "name")?.unwrap_or(stem);
             if name.trim().is_empty() {
                 return Err(bad(c, "a scan needs a `name`"));
@@ -2903,21 +2932,29 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
                 Some(u) => cloud::unit(&u).ok_or_else(|| bad(c, format!("`units` is one of mm, cm, m, in, ft, not {u}")))?,
             };
             let spacing = num(c, p, "spacing")?.unwrap_or(0.0);
-            // What the project's other scans leave of what it may hold.
+            // What the project's other scans leave of what it may hold, shared among the files.
             let held: usize = m.clouds.values().map(Cloud::len).sum();
             let cap = cloud::MAX_CLOUD_POINTS.saturating_sub(held);
             if cap == 0 {
                 return Err(bad(c, format!("the project's scans hold {held} points, all it may; delete the point clouds of one first")));
             }
-            let len = std::fs::metadata(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
-            if len > cloud::MAX_BYTES as u64 {
-                return Err(bad(c, format!("{} is too large ({len} bytes; up to {})", path.display(), cloud::MAX_BYTES)));
+            let options = cloud::Options { scale, spacing, cap: (cap / paths.len()).max(1) };
+            let mut scans = Vec::with_capacity(paths.len());
+            for (path, format) in paths.iter().zip(formats) {
+                let len = std::fs::metadata(path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
+                if len > cloud::MAX_BYTES as u64 {
+                    return Err(bad(c, format!("{} is too large ({len} bytes; up to {})", path.display(), cloud::MAX_BYTES)));
+                }
+                let bytes = std::fs::read(path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+                let read = cloud::read(&bytes, format, &options).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+                let source = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                scans.push((source, read));
             }
-            let bytes = std::fs::read(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
-            let options = cloud::Options { scale, spacing, cap };
-            let read = cloud::read(&bytes, format, &options).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
-            let source = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-            (name, Cloud::new(&source, read).map_err(|e| bad(c, e))?, true)
+            let scan = match <[_; 1]>::try_from(scans) {
+                Ok([(source, read)]) => Cloud::new(&source, read),
+                Err(scans) => cloud::merge(scans, spacing).and_then(|(read, stations)| Cloud::of_stations(read, stations)),
+            };
+            (name, scan.map_err(|e| bad(c, e))?, true)
         }
     };
     let (lo, _) = scan.bounds();

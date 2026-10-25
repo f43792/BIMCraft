@@ -114,6 +114,49 @@ fn units_spacing_and_files_it_cant_take() {
 }
 
 #[test]
+fn several_files_come_in_as_one_scan_with_a_station_for_each() {
+    let mut s = Session::new();
+    // Two stations of one survey, metres, meeting at x = 4: one coloured, one not.
+    let east = scan("stations", "east.xyz", "0 0 0 255 0 0\n4 0 0 255 0 0\n");
+    let west = scan("stations", "west.xyz", "4 0 0\n8 0 2\n");
+    let r = run(&mut s, "point_cloud", json!({"path": [east, west]}));
+    assert_eq!((r["cloud"].as_str(), r["points"].as_u64(), r["read"].as_u64()), (Some("east"), Some(4), Some(4)), "{r}");
+    let origin: Vec<f64> = r["origin"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert!(near([origin[0], origin[1], origin[2]], [4000.0, 0.0, 1000.0]), "{origin:?}");
+    let (lo, hi) = bounds(&s, r["id"].as_u64().unwrap());
+    assert!(near(lo, [-4000.0, 0.0, 0.0]) && near(hi, [4000.0, 0.0, 2000.0]), "{lo:?} {hi:?}");
+    let e = one(&mut s);
+    assert_eq!(e["stations"], json!([{"source": "east.xyz", "points": 2}, {"source": "west.xyz", "points": 2}]), "{e}");
+    // The station with no colours is grey among the one with.
+    let colours = s.model.clouds.get("east").unwrap().colours().unwrap().to_vec();
+    assert_eq!((colours[0], colours[2]), ([255, 0, 0], [crate::cloud::GREY; 3]));
+    // Where the stations overlap, a spacing keeps one point.
+    let r = run(&mut s, "point_cloud", json!({"path": [east, west], "name": "thinned", "spacing": 100}));
+    assert_eq!((r["points"].as_u64(), r["read"].as_u64()), (Some(3), Some(4)), "{r}");
+    let stations = s.model.clouds.get("thinned").unwrap().stations().to_vec();
+    assert_eq!(stations.iter().map(|t| t.points).collect::<Vec<_>>(), [2, 1]);
+    // Saved, it opens with its stations.
+    let before = s.model.clouds.clone();
+    let file = std::env::temp_dir().join(format!("bimcraft-cloud-{}-stations.bimcraft", std::process::id()));
+    run(&mut s, "save", json!({"path": file}));
+    let mut t = Session::new();
+    run(&mut t, "open", json!({"path": file}));
+    assert_eq!(t.model.clouds, before);
+    // A list of one is the file alone.
+    run(&mut s, "point_cloud", json!({"path": [east], "name": "alone"}));
+    assert!(s.model.clouds.get("alone").unwrap().stations().is_empty());
+    let many = vec![east.clone(); crate::cloud::MAX_STATIONS + 1];
+    for (p, says) in [
+        (json!({"path": []}), "path"),
+        (json!({"path": [east, 3], "name": "n"}), "path"),
+        (json!({"path": many, "name": "n"}), &crate::cloud::MAX_STATIONS.to_string()[..]),
+    ] {
+        let e = fails(&mut s, "point_cloud", p.clone());
+        assert!(e.contains(says), "{e}");
+    }
+}
+
+#[test]
 fn a_scan_is_brought_in_once_and_placed_as_often_as_wanted() {
     let mut s = Session::new();
     let path = scan("again", "box.xyz", BOX);
@@ -202,4 +245,109 @@ fn insert_from_file_brings_a_scan_with_the_point_cloud_that_places_it() {
     let e = one(&mut s);
     assert_eq!((e["cloud"].as_str(), &e["at"]), (Some("box"), &json!([500.0, 0.0])), "{e}");
     assert_eq!(s.model.clouds.get("box"), from.model.clouds.get("box"));
+}
+
+// ---------- the 3D view ----------
+
+use crate::graphics::Look;
+use crate::render::Rgb;
+use crate::view3d::{AZIMUTH, ELEVATION, Image, Scene, gpu};
+
+/// A scan of a wall's face: points every 20 mm over 2 m by 2 m standing on y = 0, in metres, each in `rgb` or in none.
+fn sheet(rgb: Option<[u8; 3]>) -> String {
+    let mut text = String::new();
+    for i in 0..=100 {
+        for k in 0..=100 {
+            let (x, z) = (f64::from(i) * 0.02, f64::from(k) * 0.02);
+            text += &match rgb {
+                Some([r, g, b]) => format!("{x} 0 {z} {r} {g} {b}\n"),
+                None => format!("{x} 0 {z}\n"),
+            };
+        }
+    }
+    text
+}
+
+/// How many pixels of the picture are `colour`'s.
+fn pixels(img: &Image, colour: impl Fn(Rgb) -> bool) -> usize {
+    let (w, h) = (img.width, img.height);
+    (0..h).flat_map(|y| (0..w).map(move |x| (f64::from(x) + 0.5, f64::from(y) + 0.5))).filter(|&(x, y)| colour(img.color(x, y))).count()
+}
+
+fn red(c: Rgb) -> bool {
+    c.0 > 200 && c.1 < 60 && c.2 < 60
+}
+
+#[test]
+fn a_scan_shows_in_the_3d_view_in_its_own_colours_fitted_and_picked_as_its_element() {
+    let mut s = Session::new();
+    let sheet = scan("view", "sheet.xyz", &sheet(Some([255, 0, 0])));
+    let id = run(&mut s, "point_cloud", json!({"path": sheet, "at": [40_000, -25_000]}))["id"].as_u64().unwrap();
+    let scene = Scene::new(&s.model);
+    let img = scene.render(&scene.fit(AZIMUTH, ELEVATION, 320, 240), &[]);
+    let reds: Vec<(f64, f64)> = (0..240)
+        .flat_map(|y| (0..320).map(move |x| (f64::from(x) + 0.5, f64::from(y) + 0.5)))
+        .filter(|&(x, y)| red(img.color(x, y)))
+        .collect();
+    // Fitted, the view shows all of the scan, far as it is from the origin, its points close enough to read as a surface.
+    let (lo, hi) = reds
+        .iter()
+        .fold(((f64::MAX, f64::MAX), (f64::MIN, f64::MIN)), |(lo, hi), p| ((lo.0.min(p.0), lo.1.min(p.1)), (hi.0.max(p.0), hi.1.max(p.1))));
+    assert!(lo.0 > 1.0 && lo.1 > 1.0 && hi.0 < 319.0 && hi.1 < 239.0, "{lo:?} to {hi:?}");
+    let filled = reds.len() as f64 / ((hi.0 - lo.0) * (hi.1 - lo.1));
+    assert!(reds.len() > 3000 && filled > 0.5, "{} {filled}", reds.len());
+    assert!(reds.iter().all(|&(x, y)| img.pick(x, y) == Some(id)));
+    assert!(img.shows().contains(&id));
+    assert!(img.in_box((0.0, 0.0), (320.0, 240.0), false).contains(&id));
+    // A point has no face to paint.
+    assert_eq!(img.face(reds[0].0, reds[0].1), None);
+    // Selected, it shows in the selection's colour.
+    let tinted = scene.render(&scene.fit(AZIMUTH, ELEVATION, 320, 240), &[(id, Rgb(0, 0, 255))]);
+    assert_eq!(pixels(&tinted, red), 0);
+}
+
+#[test]
+fn a_scan_with_no_colours_is_grey_and_a_view_can_colour_or_hide_it() {
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("grey", "sheet.xyz", &sheet(None))}))["id"].as_u64().unwrap();
+    let scene = Scene::new(&s.model);
+    let cam = scene.fit(AZIMUTH, ELEVATION, 320, 240);
+    let grey = |c: Rgb| c == Rgb(160, 160, 160);
+    let n = pixels(&scene.render_in(&cam, &[], &Look::of_3d(&s.model)), grey);
+    assert!(n > 3000, "{n}");
+    run(&mut s, "graphics", json!({"view": "{3D}", "elements": {id.to_string(): {"projection": {"fill": [255, 0, 0]}}}}));
+    let img = scene.render_in(&cam, &[], &Look::of_3d(&s.model));
+    assert_eq!((pixels(&img, grey), pixels(&img, red)), (0, n));
+    run(&mut s, "graphics", json!({"view": "{3D}", "reset": true, "hide_elements": [id]}));
+    let img = scene.render_in(&cam, &[], &Look::of_3d(&s.model));
+    assert_eq!((pixels(&img, grey), img.shows().contains(&id)), (0, false));
+}
+
+#[test]
+fn what_is_nearer_hides_a_scan_and_a_scan_hides_what_is_behind_it() {
+    let mut s = Session::new();
+    run(&mut s, "point_cloud", json!({"path": scan("depth", "sheet.xyz", &sheet(Some([255, 0, 0])))}));
+    let cam = Scene::new(&s.model).fit(AZIMUTH, ELEVATION, 320, 240);
+    let reds = |s: &Session| pixels(&Scene::new(&s.model).render(&cam, &[]), red);
+    let alone = reds(&s);
+    // A tall wall a metre to either side of it: one is in front of it, the other behind.
+    let mut seen = Vec::new();
+    for y in [-1000, 1000] {
+        run(&mut s, "wall", json!({"points": [[-3000, y], [3000, y]], "height": 6000}));
+        seen.push(reds(&s));
+        run(&mut s, "undo", json!({}));
+    }
+    seen.sort();
+    assert!(seen[0] < alone / 10 && seen[1] > alone * 9 / 10, "{alone}: {seen:?}");
+}
+
+#[test]
+fn the_graphics_card_leaves_a_view_with_a_scan_to_the_processor() {
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("gpu", "box.xyz", BOX)}))["id"].as_u64().unwrap();
+    run(&mut s, "wall", json!({"points": [[0, 0], [3000, 0]]}));
+    let err = gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).err().unwrap();
+    assert!(err.contains("point cloud"), "{err}");
+    run(&mut s, "graphics", json!({"view": "{3D}", "hide_elements": [id]}));
+    assert!(gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).is_ok());
 }

@@ -2171,8 +2171,9 @@ impl Model {
             .iter()
             .flat_map(|s| s.corners())
             .map(|p| P2(p[0], p[1]))
-            .chain(self.elements.values().flat_map(|e| match e {
+            .chain(self.elements.iter().flat_map(|(id, e)| match e {
                 Element::Grid(g) => vec![g.start, g.end],
+                Element::PointCloud(_) => self.cloud_box(*id).map_or(Vec::new(), |(lo, hi)| vec![P2(lo[0], lo[1]), P2(hi[0], hi[1])]),
                 _ => Vec::new(),
             }))
             .collect::<Vec<_>>();
