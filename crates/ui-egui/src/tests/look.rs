@@ -50,3 +50,35 @@ fn a_click_on_a_card_or_between_cards_is_no_click_on_the_view() {
     }
     assert_eq!(ids(&h, "wall").len(), walls, "no wall was drawn");
 }
+
+#[test]
+fn the_options_bar_floats_over_the_view_while_it_has_something_on_it_and_the_view_never_moves() {
+    let mut h = app(BOX);
+    let view = h.state().view_rect;
+    assert!(h.query_by_label("Location Line:").is_none(), "with nothing to set there's no bar");
+    tool(&mut h, "Wall");
+    assert_eq!(h.state().view_rect, view, "the bar coming takes no room from the view");
+    let field = h.get_by_label("Location Line:").rect();
+    assert!(view.contains_rect(field), "it lies over the view: {field:?} in {view:?}");
+    key(&mut h, Key::Escape);
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(0.0, 3000.0));
+    assert_eq!(h.state().selection.len(), 1);
+    assert_eq!(h.state().view_rect, view, "nor does a selection's");
+}
+
+#[test]
+fn a_click_on_the_floating_options_bar_is_no_click_on_the_view_under_it() {
+    let mut h = app(BOX);
+    tool(&mut h, "Wall");
+    let label = h.get_by_label("Location Line:").rect();
+    // On the bar's label, and on the bar just left of it.
+    for at in [label.center(), label.left_center() - vec2(4.0, 0.0)] {
+        click_at(&mut h, at);
+    }
+    assert!(ids(&h, "wall").len() == 4, "no wall was started from the bar");
+    // Off it, the tool works as ever.
+    click(&mut h, P2(2000.0, 3000.0));
+    click(&mut h, P2(5000.0, 3000.0));
+    assert_eq!(ids(&h, "wall").len(), 5);
+}

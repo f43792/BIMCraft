@@ -126,8 +126,9 @@ and Mono (`assets/fonts`, SIL OFL 1.1), with `style::semibold` for titles and ta
 frame after `apply`). `BimApp::show` paints the active view's ground (`backdrop`) under everything, then the app bar (Home, File, the
 Quick Access Toolbar and the title, light on dark, `style::on_app_bar`), and the ribbon, the Options Bar, the status bar and each docked
 palette stack as cards, so the gaps between them read as the view going on beneath; the view control bar is a small card in the view's
-corner. The Options Bar is always there (Modify, greyed, when there's nothing to set), so the view never moves under a drag when a
-selection fills it. File > Settings > Layout picks Floating (the cards) or Compact (`BimApp::compact`, kept in `settings.json` as
+corner. The Options Bar (`BimApp::options_bar`) floats over the view's top left, an `Area` above it, while there's something on it (a
+contextual tab's name, a tool's options): coming and going it takes no room, so the view never moves under a drag when a selection
+fills it, and a click on it never reaches the view. File > Settings > Layout picks Floating (the cards) or Compact (`BimApp::compact`, kept in `settings.json` as
 `layout`): the same pieces flush to the edges and square, `style::gap` and `style::card` reading it each frame (`style::follow`).
 
 The ribbon's panels (`ribbon.rs`). A panel's name, under its tools, is a button (named `Build ▾` for screen readers) whose list
