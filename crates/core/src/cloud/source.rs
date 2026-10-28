@@ -41,13 +41,25 @@ impl Source for &[u8] {
 pub struct FileSource {
     file: Mutex<std::fs::File>,
     size: u64,
+    stamp: u64,
 }
 
 impl FileSource {
     pub fn open(path: &Path) -> Result<FileSource, String> {
         let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let size = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
-        Ok(FileSource { file: Mutex::new(file), size })
+        let meta = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?;
+        // When it was last written, in nanoseconds; 0 where the system doesn't say.
+        let stamp = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        Ok(FileSource { file: Mutex::new(file), size: meta.len(), stamp })
+    }
+
+    /// When it was last written: part of what tells a scan's cache it's still the file's.
+    pub fn stamp(&self) -> u64 {
+        self.stamp
     }
 }
 

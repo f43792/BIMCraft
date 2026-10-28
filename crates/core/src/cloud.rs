@@ -13,6 +13,7 @@ use flate2::write::ZlibEncoder;
 
 use serde::{Deserialize, Serialize};
 
+pub mod cache;
 mod e57;
 pub mod octree;
 pub mod source;
@@ -549,14 +550,7 @@ pub fn read_from(src: &dyn Source, format: Format, o: &Options) -> Result<Scan, 
     if stats.count == 0 {
         return Err("it holds no points".into());
     }
-    let mut origin = [0.0; 3];
-    for k in 0..3 {
-        let wide = stats.max[k] - stats.min[k];
-        if wide > MAX_SPAN {
-            return Err(format!("it's {wide:.0} mm wide along {}; up to {MAX_SPAN} mm", ["x", "y", "z"][k]));
-        }
-        origin[k] = (stats.min[k] + stats.max[k]) / 2.0;
-    }
+    let origin = stats.middle()?;
     // Every so many, so the cap is never passed, and then one in each cube of the spacing.
     let stride = stats.count.div_ceil(o.cap).max(1);
     let colour = stats.colour();
@@ -632,6 +626,19 @@ impl Stats {
         }
         self.count += 1;
         Ok(())
+    }
+
+    /// The middle of the points' box, the cloud's own zero, or why they spread too far for one.
+    fn middle(&self) -> Result<[f64; 3], String> {
+        let mut origin = [0.0; 3];
+        for k in 0..3 {
+            let wide = self.max[k] - self.min[k];
+            if wide > MAX_SPAN {
+                return Err(format!("it's {wide:.0} mm wide along {}; up to {MAX_SPAN} mm", ["x", "y", "z"][k]));
+            }
+            origin[k] = (self.min[k] + self.max[k]) / 2.0;
+        }
+        Ok(origin)
     }
 
     /// How the points are shaded, or none when the file holds neither colour nor intensity.

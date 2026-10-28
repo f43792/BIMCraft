@@ -12,7 +12,7 @@ pub const NODE_POINTS: usize = 25_000;
 /// The most a node keeps of a larger inflow: past it, its grid is made coarser.
 pub const NODE_MAX: usize = 65_536;
 /// Squares of a node's grid along each side of its cube.
-const GRID: u32 = 64;
+pub(super) const GRID: u32 = 64;
 /// The deepest level: a node there keeps all it is given, so points in one place end the tree.
 pub const MAX_LEVEL: u8 = 20;
 /// Detail finer than this, px, adds nothing to a picture: below a node drawn with its squares smaller, a selection doesn't look.
@@ -33,6 +33,16 @@ pub struct Node {
 }
 
 impl Node {
+    /// A node of a tree kept on disk ([`super::cache`]), whose points are its own block there, not indices.
+    pub(super) fn kept(lo: [f64; 3], edge: f64, spacing: f64, level: u8, len: usize, children: [u32; 8]) -> Node {
+        Node { lo, edge, spacing, level, start: 0, len, children }
+    }
+
+    /// Each eighth's node, 0 for none.
+    pub(super) fn slots(&self) -> [u32; 8] {
+        self.children
+    }
+
     pub fn hi(&self) -> [f64; 3] {
         self.lo.map(|v| v + self.edge)
     }
@@ -82,14 +92,17 @@ impl Octree {
                 }
             }
         }
-        let lo = lo.map(|v| if v.is_finite() { v } else { 0.0 });
-        // A cube a millimetre wide at least, a little past the farthest point so it lies inside.
-        let edge = (0..3).map(|k| hi[k] - lo[k]).filter(|v| v.is_finite()).fold(0.0, f64::max).max(1.0) * (1.0 + 1e-6);
+        let (lo, edge) = cube(lo, hi);
         subtree(points, lo, edge, 0, (0..n as u32).collect())
     }
 
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
+    }
+
+    /// A tree of `nodes`, root first, whose points are elsewhere ([`super::cache`]).
+    pub(super) fn of_nodes(nodes: Vec<Node>) -> Octree {
+        Octree { order: Vec::new(), nodes }
     }
 
     /// The indices of the cloud's points node `node` keeps.
@@ -98,10 +111,17 @@ impl Octree {
     }
 }
 
+/// The root's cube of points from `lo` to `hi`: a millimetre wide at least, a little past the farthest point so it lies inside.
+pub(super) fn cube(lo: [f64; 3], hi: [f64; 3]) -> ([f64; 3], f64) {
+    let lo = lo.map(|v| if v.is_finite() { v } else { 0.0 });
+    let edge = (0..3).map(|k| hi[k] - lo[k]).filter(|v| v.is_finite()).fold(0.0, f64::max).max(1.0) * (1.0 + 1e-6);
+    (lo, edge)
+}
+
 /// The tree under the node of cube `lo`, `edge` wide, at `level`, given `inflow`: the node first, then each eighth's tree, built
 /// on the threads there are. A node keeps one point in each square of its grid, first come first kept, and passes the rest to the
 /// eighth of its cube each lies in; a grid with more squares filled than a node may keep is made coarser.
-fn subtree(points: &[[f32; 3]], lo: [f64; 3], edge: f64, level: u8, inflow: Vec<u32>) -> Octree {
+pub(super) fn subtree(points: &[[f32; 3]], lo: [f64; 3], edge: f64, level: u8, inflow: Vec<u32>) -> Octree {
     let mut node = Node { lo, edge, spacing: 0.0, level, start: 0, len: inflow.len(), children: [0; 8] };
     if inflow.len() <= NODE_POINTS || level >= MAX_LEVEL {
         return Octree { order: inflow, nodes: vec![node] };
@@ -164,7 +184,7 @@ fn subtree(points: &[[f32; 3]], lo: [f64; 3], edge: f64, level: u8, inflow: Vec<
 }
 
 /// Which of `grid`³ squares of the cube at `lo`, `edge` wide, `p` lies in.
-fn square(p: [f32; 3], lo: [f64; 3], edge: f64, grid: u32) -> usize {
+pub(super) fn square(p: [f32; 3], lo: [f64; 3], edge: f64, grid: u32) -> usize {
     let g = f64::from(grid);
     let at = |k: usize| ((f64::from(p[k]) - lo[k]) / edge * g).floor().clamp(0.0, g - 1.0) as usize;
     let g = grid as usize;
