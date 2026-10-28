@@ -15,11 +15,14 @@ use serde::{Deserialize, Serialize};
 
 mod e57;
 pub mod octree;
+pub mod source;
+
+pub use source::{FileSource, Source};
 
 /// Points a project's scans may keep among them: a file with more is thinned down to what the others leave. A picture draws no
 /// more than its budget of them however many there are ([`octree`]).
 pub const MAX_CLOUD_POINTS: usize = 30_000_000;
-/// What a file may be before it's refused, bytes.
+/// What a file held whole in memory ([`read`]) may be before it's refused, bytes; one read from disk ([`read_from`]) has no cap.
 pub const MAX_BYTES: usize = 2 << 30;
 /// How far a file's coordinates may lie from its own origin, mm: a survey's, a long way off, but never past it.
 pub const MAX_FILE_COORD: f64 = 1e12;
@@ -522,6 +525,15 @@ fn scans_within<'de, D: serde::Deserializer<'de>>(
 
 /// The points of a file of `format`, or what's wrong with it.
 pub fn read(bytes: &[u8], format: Format, o: &Options) -> Result<Scan, String> {
+    if bytes.len() > MAX_BYTES {
+        return Err(format!("it's {} bytes; up to {MAX_BYTES}", bytes.len()));
+    }
+    read_from(&bytes, format, o)
+}
+
+/// The points of the file `src` holds, as [`read`] keeps them, read a piece at a time: a file on disk ([`FileSource`]) is
+/// never held whole, so it may be as large as it likes.
+pub fn read_from(src: &dyn Source, format: Format, o: &Options) -> Result<Scan, String> {
     if !(o.scale.is_finite() && o.scale > 0.0) {
         return Err(format!("a unit of {} mm isn't one", o.scale));
     }
@@ -531,12 +543,9 @@ pub fn read(bytes: &[u8], format: Format, o: &Options) -> Result<Scan, String> {
     if o.cap == 0 {
         return Err("a cloud keeps one point at least".into());
     }
-    if bytes.len() > MAX_BYTES {
-        return Err(format!("it's {} bytes; up to {MAX_BYTES}", bytes.len()));
-    }
     // ponytail: the file is parsed twice, once to measure it and once to keep its points; text files pay for it.
     let mut stats = Stats::default();
-    each(bytes, format, &mut |raw| stats.add(&raw, o.scale))?;
+    each(src, format, &mut |raw| stats.add(&raw, o.scale))?;
     if stats.count == 0 {
         return Err("it holds no points".into());
     }
@@ -553,7 +562,7 @@ pub fn read(bytes: &[u8], format: Format, o: &Options) -> Result<Scan, String> {
     let colour = stats.colour();
     let mut cells = HashSet::new();
     let (mut points, mut colours, mut n) = (Vec::new(), Vec::new(), 0_usize);
-    each(bytes, format, &mut |raw| {
+    each(src, format, &mut |raw| {
         let at = n;
         n += 1;
         if at % stride != 0 {
@@ -667,27 +676,31 @@ impl Shade {
 }
 
 /// Hands each point of a file to `f`, in the file's order.
-fn each(bytes: &[u8], format: Format, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+fn each(src: &dyn Source, format: Format, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    each_in(src, format, source::CHUNK, f)
+}
+
+/// As [`each`], reading `chunk` bytes at a time where it reads in order.
+fn each_in(src: &dyn Source, format: Format, chunk: usize, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
     match format {
-        Format::Pts | Format::Xyz => text(bytes, format == Format::Pts, f),
-        Format::Ply => ply(bytes, f),
-        Format::Las => las(bytes, f),
-        Format::E57 => e57::read(bytes, f),
+        Format::Pts | Format::Xyz => text(src, format == Format::Pts, chunk, f),
+        Format::Ply => ply(src, chunk, f),
+        Format::Las => las(src, chunk, f),
+        Format::E57 => e57::read(src, f),
     }
 }
 
 /// Rows of `x y z`, then an intensity, a colour, or both, parted by spaces, tabs or commas. In PTS a row of one
 /// number is the count of the scan that follows.
-fn text(bytes: &[u8], pts: bool, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
-    for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
-        let n = n + 1;
+fn text(src: &dyn Source, pts: bool, chunk: usize, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    source::lines(src, 0, chunk, &mut |n, line| {
         let line = std::str::from_utf8(line).map_err(|_| format!("line {n} isn't text"))?.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
-            continue;
+            return Ok(true);
         }
         let words: Vec<&str> = line.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
         if pts && words.len() == 1 && words.first().is_some_and(|w| w.parse::<u64>().is_ok()) {
-            continue;
+            return Ok(true);
         }
         let mut v = [0.0; 7];
         for (k, w) in words.iter().take(7).enumerate() {
@@ -706,8 +719,8 @@ fn text(bytes: &[u8], pts: bool, f: &mut impl FnMut(Raw) -> Result<(), String>) 
             k => return Err(format!("line {n}: {k} columns; a point is x y z, then an intensity, a colour (r g b), or both")),
         };
         f(Raw { p: [x, y, z], intensity, rgb })?;
-    }
-    Ok(())
+        Ok(true)
+    })
 }
 
 /// A number type a PLY property may be.
@@ -795,14 +808,16 @@ impl Element {
 const PLY_HEADER: usize = 1 << 20;
 
 /// The Polygon File Format: a text header, then its elements as text or binary. Only the vertices are read.
-fn ply(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
-    if !bytes.starts_with(b"ply") {
+fn ply(src: &dyn Source, chunk: usize, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    let head = source::take(src, 0, usize::try_from(src.size()).unwrap_or(PLY_HEADER).min(PLY_HEADER))?;
+    if !head.starts_with(b"ply") {
         return Err("it isn't a PLY file: it doesn't start with ply".into());
     }
-    let head = bytes.get(..PLY_HEADER.min(bytes.len())).unwrap_or(bytes);
     let end = head.windows(10).position(|w| w == b"end_header").ok_or("its header has no end_header")?;
-    let body = bytes.get(end..).unwrap_or(&[]);
-    let body = body.get(body.iter().position(|b| *b == b'\n').map_or(body.len(), |i| i + 1)..).unwrap_or(&[]);
+    // The body starts after the line end_header is on; where the header fills all that was read, at its end.
+    let after = head.get(end..).unwrap_or_default();
+    let body_at = (end + after.iter().position(|b| *b == b'\n').map_or(after.len(), |i| i + 1)) as u64;
+    let head = head.as_slice();
     let header = std::str::from_utf8(head.get(..end).unwrap_or(&[])).map_err(|_| "its header isn't text")?;
     let mut form = None;
     let mut elements: Vec<Element> = Vec::new();
@@ -871,21 +886,41 @@ fn ply(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<()
     };
     match big {
         None => {
-            let mut lines = body.split(|b| *b == b'\n').map(|l| l.trim_ascii()).filter(|l| !l.is_empty());
-            for e in before {
-                for _ in 0..e.count {
-                    lines.next().ok_or_else(|| format!("it's cut short in its {} elements", e.name))?;
-                }
+            // The lines that aren't blank: those of the elements before the vertices, then the vertices'.
+            let skip: usize = before.iter().map(|e| e.count).fold(0, usize::saturating_add);
+            let (mut skipped, mut n) = (0_usize, 0_usize);
+            if skip > 0 || vertex.count > 0 {
+                source::lines(src, body_at, chunk, &mut |_, line| {
+                    let line = line.trim_ascii();
+                    if line.is_empty() {
+                        return Ok(true);
+                    }
+                    if skipped < skip {
+                        skipped += 1;
+                        return Ok(skipped < skip || vertex.count > 0);
+                    }
+                    let line = std::str::from_utf8(line).map_err(|_| format!("vertex {} isn't text", n + 1))?;
+                    let words: Vec<f64> = line
+                        .split_whitespace()
+                        .map(|w| w.parse::<f64>().map_err(|_| format!("vertex {}: {w} isn't a number", n + 1)))
+                        .collect::<Result<_, _>>()?;
+                    let raw = point(&|i| words.get(i).copied()).ok_or_else(|| format!("vertex {} has too few values", n + 1))?;
+                    f(raw)?;
+                    n += 1;
+                    Ok(n < vertex.count)
+                })?;
             }
-            for n in 0..vertex.count {
-                let line = lines.next().ok_or_else(|| format!("it's cut short: {} vertices of {}", n, vertex.count))?;
-                let line = std::str::from_utf8(line).map_err(|_| format!("vertex {} isn't text", n + 1))?;
-                let words: Vec<f64> = line
-                    .split_whitespace()
-                    .map(|w| w.parse::<f64>().map_err(|_| format!("vertex {}: {w} isn't a number", n + 1)))
-                    .collect::<Result<_, _>>()?;
-                let raw = point(&|i| words.get(i).copied()).ok_or_else(|| format!("vertex {} has too few values", n + 1))?;
-                f(raw)?;
+            if skipped < skip {
+                let mut left = skipped;
+                let short = before.iter().find(|e| {
+                    let here = left < e.count;
+                    left = left.saturating_sub(e.count);
+                    here
+                });
+                return Err(format!("it's cut short in its {} elements", short.map_or("", |e| e.name.as_str())));
+            }
+            if n < vertex.count {
+                return Err(format!("it's cut short: {} vertices of {}", n, vertex.count));
             }
         }
         Some(big) => {
@@ -906,17 +941,17 @@ fn ply(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<()
                     Some(at)
                 })
                 .collect();
-            let need = vertex.count.checked_mul(stride).and_then(|b| b.checked_add(skip));
-            let rows = need
-                .and_then(|need| body.get(skip..need))
-                .ok_or_else(|| format!("it's cut short: {} vertices don't fit in it", vertex.count))?;
-            for row in rows.chunks_exact(stride.max(1)) {
+            let need = vertex.count.checked_mul(stride).and_then(|b| b.checked_add(skip)).map(|b| b as u64 + body_at);
+            if need.is_none_or(|need| need > src.size()) {
+                return Err(format!("it's cut short: {} vertices don't fit in it", vertex.count));
+            }
+            source::records(src, body_at + skip as u64, (stride.max(1), vertex.count as u64), chunk, &mut |row| {
                 let v = |i: usize| -> Option<f64> {
                     let t = vertex.props.get(i)?.1?;
                     t.read(row.get(*offsets.get(i)?..)?, big)
                 };
-                f(point(&v).ok_or("a vertex can't be read")?)?;
-            }
+                f(point(&v).ok_or("a vertex can't be read")?)
+            })?;
         }
     }
     Ok(())
@@ -926,7 +961,9 @@ fn ply(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<()
 const LAS_RECORD: [usize; 11] = [20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67];
 
 /// ASPRS LAS 1.0 to 1.4: a header, records of its own, then the points, each scaled and moved by the header.
-fn las(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+fn las(src: &dyn Source, chunk: usize, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    // The header's fields are all within its first 375 bytes.
+    let bytes = source::take(src, 0, usize::try_from(src.size()).unwrap_or(375).min(375))?;
     if !bytes.starts_with(b"LASF") {
         return Err("it isn't a LAS file: it doesn't start with LASF".into());
     }
@@ -944,7 +981,7 @@ fn las(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<()
         return Err(format!("it's LAS {major}.{minor}; BIMCraft reads 1.0 to 1.4"));
     }
     let header = usize::from(u16_at(94)?);
-    if header < 227 || header > bytes.len() {
+    if header < 227 || header as u64 > src.size() {
         return Err(short());
     }
     let start = u32_at(96)? as usize;
@@ -971,37 +1008,36 @@ fn las(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<()
             return Err(format!("its offset along {} is {}", ["x", "y", "z"][k], offset[k]));
         }
     }
-    let end = usize::try_from(count).ok().and_then(|c| c.checked_mul(len)).and_then(|b| b.checked_add(start));
-    let points = end
-        .filter(|_| start >= header)
-        .and_then(|end| bytes.get(start..end))
-        .ok_or_else(|| format!("its points are cut short: {count} of {len} bytes from byte {start} don't fit in {} bytes", bytes.len()))?;
+    let end = count.checked_mul(len as u64).and_then(|b| b.checked_add(start as u64));
+    if !end.is_some_and(|end| start >= header && end <= src.size()) {
+        return Err(format!("its points are cut short: {count} of {len} bytes from byte {start} don't fit in {} bytes", src.size()));
+    }
     let colour = match format {
         2 => Some(20),
         3 | 5 => Some(28),
         7 | 8 | 10 => Some(30),
         _ => None,
     };
-    for r in points.chunks_exact(len) {
+    source::records(src, start as u64, (len, count), chunk, &mut |r| {
         let i32_at = |i: usize| r.get(i..i + 4).and_then(|b| b.try_into().ok()).map(i32::from_le_bytes).map(f64::from);
         let u16_in = |i: usize| r.get(i..i + 2).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes).map(f64::from);
         let xyz = [i32_at(0), i32_at(4), i32_at(8)];
         let [Some(x), Some(y), Some(z)] = xyz else {
-            return Err("a point record is cut short".into());
+            return Err("a point record is cut short".to_string());
         };
         let p = [x * scale[0] + offset[0], y * scale[1] + offset[1], z * scale[2] + offset[2]];
         let rgb = match colour.map(|at| [u16_in(at), u16_in(at + 2), u16_in(at + 4)]) {
             Some([Some(r), Some(g), Some(b)]) => Some([r, g, b]),
             _ => None,
         };
-        f(Raw { p, intensity: u16_in(12), rgb })?;
-    }
-    Ok(())
+        f(Raw { p, intensity: u16_in(12), rgb })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cloud::source::MAX_LINE;
 
     fn mm() -> Options {
         Options { scale: 1.0, ..Options::default() }
@@ -1088,6 +1124,59 @@ mod tests {
             }
         }
         b
+    }
+
+    /// Every point a reader hands on, as numbers to compare.
+    fn handed(src: &dyn Source, format: Format, chunk: usize) -> Result<Vec<[f64; 7]>, String> {
+        let mut out = Vec::new();
+        each_in(src, format, chunk, &mut |r| {
+            let [i, rgb] = [r.intensity.map(|i| [i, 0.0, 0.0]), r.rgb];
+            let ([a, ..], [b, c, d]) = (i.unwrap_or([-1.0; 3]), rgb.unwrap_or([-1.0; 3]));
+            out.push([r.p[0], r.p[1], r.p[2], a, b, c, d]);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    #[test]
+    fn every_format_reads_the_same_a_few_bytes_at_a_time_and_from_a_file_on_disk() {
+        let pts: Vec<([f32; 3], [u8; 3])> =
+            (0..300).map(|i| ([i as f32, (i * 7 % 13) as f32, 0.5 * i as f32], [i as u8, 3, 250])).collect();
+        let text: String = pts.iter().map(|(p, c)| format!("{} {} {} {} {} {}\n", p[0], p[1], p[2], c[0], c[1], c[2])).collect();
+        let records: Vec<([i32; 3], u16, [u16; 3])> = (0..300).map(|i| ([i, -i, 2 * i], i as u16, [i as u16, 0, 65535])).collect();
+        let files = [
+            (text.clone().into_bytes(), Format::Xyz),
+            (format!("300\n{text}").into_bytes(), Format::Pts),
+            // No newline at its end.
+            (text.trim_end().as_bytes().to_vec(), Format::Xyz),
+            (ply("ascii", &pts), Format::Ply),
+            (ply("binary_little_endian", &pts), Format::Ply),
+            (ply("binary_big_endian", &pts), Format::Ply),
+            (las(2, 3, [0.01; 3], [5.0, 6.0, 7.0], 9, &records), Format::Las),
+            (las(4, 7, [0.001; 3], [0.0; 3], 0, &records), Format::Las),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        for (k, (bytes, format)) in files.iter().enumerate() {
+            let whole = handed(&bytes.as_slice(), *format, bytes.len()).unwrap();
+            assert_eq!(whole.len(), 300, "file {k}");
+            for chunk in [1, 7, 64, 1000] {
+                assert_eq!(handed(&bytes.as_slice(), *format, chunk).unwrap(), whole, "file {k}, {chunk} bytes at a time");
+            }
+            let path = dir.path().join(format!("{k}.points"));
+            std::fs::write(&path, bytes).unwrap();
+            let file = FileSource::open(&path).unwrap();
+            assert_eq!(file.size(), bytes.len() as u64);
+            assert_eq!(handed(&file, *format, 4096).unwrap(), whole, "file {k} from disk");
+            // Cut short, it says so wherever it's cut, a piece at a time as whole.
+            for cut in [bytes.len() / 3, bytes.len() - 1] {
+                let short = &bytes[..cut];
+                assert_eq!(handed(&short, *format, 7).is_err(), handed(&short, *format, cut.max(1)).is_err(), "file {k} cut at {cut}");
+            }
+        }
+        // A line longer than any a scan holds is refused, not gathered for ever.
+        let long = vec![b'1'; MAX_LINE + 10];
+        assert!(handed(&long.as_slice(), Format::Xyz, 4096).unwrap_err().contains("longer"));
+        assert!(FileSource::open(&dir.path().join("none.xyz")).is_err());
     }
 
     #[test]

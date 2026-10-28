@@ -3592,12 +3592,9 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
             let options = cloud::Options { scale, spacing, cap: (cap / paths.len()).max(1) };
             let mut scans = Vec::with_capacity(paths.len());
             for (path, format) in paths.iter().zip(formats) {
-                let len = std::fs::metadata(path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
-                if len > cloud::MAX_BYTES as u64 {
-                    return Err(bad(c, format!("{} is too large ({len} bytes; up to {})", path.display(), cloud::MAX_BYTES)));
-                }
-                let bytes = std::fs::read(path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
-                let read = cloud::read(&bytes, format, &options).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+                // Read a piece at a time: a scan on disk is never held whole, so it may be as large as it likes.
+                let file = cloud::FileSource::open(path).map_err(|e| bad(c, e))?;
+                let read = cloud::read_from(&file, format, &options).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
                 let source = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
                 scans.push((source, read));
             }

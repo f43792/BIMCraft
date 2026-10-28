@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 use super::Raw;
+use super::source::{Source, take};
 
 /// Bytes in a page, and of them, the ones that hold data (the last four are its checksum).
 const PAGE: u64 = 1024;
@@ -38,11 +39,12 @@ struct Taken {
 }
 
 /// Hands each point of every scan in an E57 file to `f`, in metres where the file put it.
-pub(super) fn read(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
-    read_within(bytes, f, CAPS)
+pub(super) fn read(src: &dyn Source, f: &mut impl FnMut(Raw) -> Result<(), String>) -> Result<(), String> {
+    read_within(src, f, CAPS)
 }
 
-fn read_within(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>, caps: Caps) -> Result<(), String> {
+fn read_within(src: &dyn Source, f: &mut impl FnMut(Raw) -> Result<(), String>, caps: Caps) -> Result<(), String> {
+    let bytes = take(src, 0, usize::try_from(src.size()).unwrap_or(48).min(48))?;
     if !bytes.starts_with(b"ASTM-E57") {
         return Err("it isn't an E57 file: it doesn't start with ASTM-E57".into());
     }
@@ -57,9 +59,9 @@ fn read_within(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>, caps
     if page != PAGE {
         return Err(format!("its pages are {page} bytes; E57's are {PAGE}"));
     }
-    let file = Paged { bytes };
+    let file = Paged { src };
     let (xml_at, xml_len) = (u64_at(24)?, u64_at(32)?);
-    let xml_len = usize::try_from(xml_len).ok().filter(|&n| n <= bytes.len()).ok_or("its XML is longer than the file")?;
+    let xml_len = usize::try_from(xml_len).ok().filter(|&n| n as u64 <= src.size()).ok_or("its XML is longer than the file")?;
     let mut xml = Vec::new();
     file.take(file.logical(xml_at)?, xml_len, &mut xml)?;
     let root = parse(&String::from_utf8_lossy(&xml))?;
@@ -76,7 +78,7 @@ fn read_within(bytes: &[u8], f: &mut impl FnMut(Raw) -> Result<(), String>, caps
 
 /// The file as E57 lays it out: logical bytes, 1020 to each page of 1024.
 struct Paged<'a> {
-    bytes: &'a [u8],
+    src: &'a dyn Source,
 }
 
 impl Paged<'_> {
@@ -94,12 +96,13 @@ impl Paged<'_> {
             let in_page = at % DATA;
             let physical = at / DATA * PAGE + in_page;
             let here = usize::try_from((DATA - in_page).min(n as u64)).unwrap_or(n);
-            let from = usize::try_from(physical).map_err(|_| "an offset past the file".to_string())?;
-            let part = from
-                .checked_add(here)
-                .and_then(|end| self.bytes.get(from..end))
-                .ok_or_else(|| format!("it's cut short: byte {physical} is past its {} bytes", self.bytes.len()))?;
-            out.extend_from_slice(part);
+            let before = out.len();
+            out.resize(before + here, 0);
+            let got = self.src.read_at(physical, out.get_mut(before..).unwrap_or_default())?;
+            if got < here {
+                out.truncate(before);
+                return Err(format!("it's cut short: byte {} is past its {} bytes", physical + got as u64, self.src.size()));
+            }
             at += here as u64;
             n -= here;
         }
@@ -853,7 +856,7 @@ mod tests {
         let xml_at = u64::from_le_bytes(file[24..32].try_into().unwrap());
         let xml_len = u64::from_le_bytes(file[32..40].try_into().unwrap()) as usize;
         let mut raw = Vec::new();
-        Paged { bytes: file }.take(xml_at / PAGE * DATA + xml_at % PAGE, xml_len, &mut raw).unwrap();
+        Paged { src: &file }.take(xml_at / PAGE * DATA + xml_at % PAGE, xml_len, &mut raw).unwrap();
         String::from_utf8(raw).unwrap()
     }
 
@@ -876,7 +879,7 @@ mod tests {
     fn within(file: &[u8], caps: Caps) -> Result<usize, String> {
         let mut n = 0;
         read_within(
-            file,
+            &file,
             &mut |_| {
                 n += 1;
                 Ok(())
@@ -928,7 +931,7 @@ mod tests {
         let lie = rewritten(&file, &format!("recordCount=\"{n}\""), "recordCount=\"4000000\"");
         let mut handed = 0;
         let e = read_within(
-            &lie,
+            &lie.as_slice(),
             &mut |_| {
                 handed += 1;
                 Ok(())
