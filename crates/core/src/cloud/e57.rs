@@ -16,13 +16,13 @@ const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 1 << 20;
 
 /// What a file may ask before any of it is unpacked. A bit-packed field can take no bits at all (a constant), so a few
-/// megabytes may declare billions of points, and every point costs a step for each field. shortcut: a survey past these
-/// is thinned where it was made; raise them when a pass over a file streams instead of holding it.
+/// megabytes may declare billions of points, and every point costs a step for each field. The points stream through (a
+/// linked scan keeps them all in its cache, a held one a share), so the cap is on the time a lie may cost, not memory.
 #[derive(Clone, Copy)]
 struct Caps {
     /// Scans in a file.
     scans: usize,
-    /// Points in all of them: five times what a project keeps, twenty.
+    /// Points in all of them: a large survey's, linked.
     points: u64,
     /// Fields a point is made of; scanners write a dozen.
     fields: usize,
@@ -30,7 +30,7 @@ struct Caps {
     ahead: usize,
 }
 
-const CAPS: Caps = Caps { scans: 4096, points: 100_000_000, fields: 32, ahead: 4 << 20 };
+const CAPS: Caps = Caps { scans: 4096, points: 1 << 32, fields: 32, ahead: 4 << 20 };
 
 /// What the scans before one have used up: the points left of the file's budget, and the sections they read.
 struct Taken {

@@ -173,3 +173,92 @@ fn a_fingerprint_changes_with_the_file_and_with_how_its_read() {
     }
     assert!(path_of(base).is_some_and(|p| p.to_string_lossy().ends_with(&format!("{base:016x}.bcoct"))));
 }
+
+/// A LAS 1.2 file of `n` coloured points, made as it's read and never held: a city block, mm, with its storeys.
+struct Synthetic {
+    n: u64,
+    header: Vec<u8>,
+}
+
+impl Synthetic {
+    const RECORD: u64 = 26;
+
+    fn new(n: u64) -> Synthetic {
+        let mut b = vec![0u8; 227];
+        b[0..4].copy_from_slice(b"LASF");
+        (b[24], b[25]) = (1, 2);
+        b[94..96].copy_from_slice(&227_u16.to_le_bytes());
+        b[96..100].copy_from_slice(&227_u32.to_le_bytes());
+        b[104] = 2;
+        b[105..107].copy_from_slice(&26_u16.to_le_bytes());
+        b[107..111].copy_from_slice(&(n as u32).to_le_bytes());
+        for k in 0..3 {
+            b[131 + 8 * k..139 + 8 * k].copy_from_slice(&0.001_f64.to_le_bytes());
+        }
+        Synthetic { n, header: b }
+    }
+
+    fn record(i: u64) -> [u8; 26] {
+        let h = (i ^ 0x9e37_79b9_7f4a_7c15).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        let h = (h ^ (h >> 31)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        let [x, y, z] = [h & 0x1f_ffff, (h >> 21) & 0x1f_ffff, ((h >> 42) & 0xffff) * 10 % 400_000];
+        let mut r = [0u8; 26];
+        for (k, v) in [x * 100, y * 100, z].into_iter().enumerate() {
+            r[4 * k..4 * k + 4].copy_from_slice(&(v as i32).to_le_bytes());
+        }
+        r[20..26].copy_from_slice(&[(h >> 8) as u8, 0, (h >> 16) as u8, 0, 200, 0]);
+        r
+    }
+}
+
+impl Source for Synthetic {
+    fn size(&self) -> u64 {
+        227 + self.n * Self::RECORD
+    }
+
+    fn read_at(&self, at: u64, buf: &mut [u8]) -> Result<usize, String> {
+        let end = (at + buf.len() as u64).min(self.size());
+        let mut put = 0;
+        let mut at = at;
+        while at < end {
+            let n = if at < 227 {
+                let part = &self.header[at as usize..(end.min(227)) as usize];
+                buf[put..put + part.len()].copy_from_slice(part);
+                part.len()
+            } else {
+                let (i, off) = ((at - 227) / Self::RECORD, ((at - 227) % Self::RECORD) as usize);
+                let r = Self::record(i);
+                let take = (26 - off).min((end - at) as usize);
+                buf[put..put + take].copy_from_slice(&r[off..off + take]);
+                take
+            };
+            (put, at) = (put + n, at + n as u64);
+        }
+        Ok(put)
+    }
+}
+
+#[test]
+#[ignore = "builds a hundred million points: run it to measure, with --ignored"]
+fn a_hundred_million_points_are_built_a_piece_at_a_time() {
+    let n = 100_000_000;
+    let src = Synthetic::new(n);
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("big.bcoct");
+    let started = std::time::Instant::now();
+    build(&src, Format::Las, 1.0, 9, &out).unwrap();
+    let built = started.elapsed();
+    let store = Store::open(&out, 9).unwrap();
+    assert_eq!((store.points(), store.header().read), (n, n));
+    let started = std::time::Instant::now();
+    let chosen = octree::select(&[store.tree()], 2_000_000, |_, _| Some(0.05));
+    let points: usize = chosen[0].iter().map(|&k| store.block(k).points.len()).sum();
+    println!(
+        "{n} points built in {built:?} ({} nodes, {} MB); {} nodes, {points} points chosen and loaded in {:?}",
+        store.tree().nodes().len(),
+        std::fs::metadata(&out).unwrap().len() >> 20,
+        chosen[0].len(),
+        started.elapsed()
+    );
+    assert!(points <= 2_000_000 && points > 1_000_000);
+}

@@ -333,6 +333,7 @@ fn rows(category: &str) -> &'static [Row] {
             ("Identity Data", "cloud", msg!("Scan"), Shown),
             ("Identity Data", "source", "File", Shown),
             ("Identity Data", "points", "Points", Shown),
+            ("Identity Data", "linked", msg!("Linked File"), Shown),
             ("Other", "at", msg!("Origin"), Point),
             ("Other", "angle", "Angle", Number),
         ],
@@ -1159,8 +1160,9 @@ impl BimApp {
                 Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
                     for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
                         let val = &v[key];
-                        // A length one element hasn't got (a straight wall's radius): no row.
-                        if ids.len() == 1 && matches!(kind, LengthShown | LengthIf) && val.is_null() {
+                        // A length one element hasn't got (a straight wall's radius), or the file of a scan that isn't
+                        // linked: no row.
+                        if ids.len() == 1 && (matches!(kind, LengthShown | LengthIf) || key == "linked") && val.is_null() {
                             continue;
                         }
                         if ids.len() == 1 && !relevant(&first, key) {

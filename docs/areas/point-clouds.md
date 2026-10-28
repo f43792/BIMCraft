@@ -5,7 +5,9 @@ plans snap to them, and the desktop brings them in (Insert > Point Cloud). IFC l
 no point cloud, and `ifc_leaves_scans_out_as_revit_does` keeps the file what it was without them.
 
 Point clouds (`cloud.rs`) come from public specifications: PTS and XYZ text, PLY (text or either byte order) and ASPRS LAS 1.0
-to 1.4 uncompressed, and ASTM E57 (`Format::from_extension` says why LAZ and ReCap's RCP/RCS don't). `cloud::read` parses a file twice,
+to 1.4 uncompressed, and ASTM E57 (`Format::from_extension` says why LAZ and ReCap's RCP/RCS don't). A file is read a piece at a
+time through a `Source` (`cloud/source.rs`: bytes asked for where they are, `FileSource` for one on disk; text goes by in lines
+and LAS and PLY in records, a few megabytes at once), so a file of any size is read without being held. `cloud::read_from` parses a file twice,
 once to measure it (`Stats`: the count, the bounds, the ranges of intensity and colour) and once to keep it: every `stride`th
 point so `Options::cap` is never passed, then one in each cube of `spacing`, the same every time. A `Scan` keeps its points as
 `f32` about `origin`, the middle of its bounds, so a survey's coordinates far off keep their millimetres within `MAX_SPAN`;
@@ -20,7 +22,7 @@ whose bytestreams, one for each field of the `prototype`, are bit-packed and run
 Float (single or double), Integer and ScaledInteger, and only bit-packing, the one codec E57 writes, is read. Cartesian or
 spherical coordinates both come in, a point marked invalid doesn't, and colour is scaled from `colorLimits` (or its field's
 range) to eight bits. `images2D` is passed over. A file is held to `Caps` before anything is unpacked: up to 4096 scans, 100 million
-points in all of them, 32 fields to a point, no two scans on one section, a section with room for the bits its count asks for (a
+points in all of them (2^32: the points stream through, so the cap is on the time a lie costs), 32 fields to a point, no two scans on one section, a section with room for the bits its count asks for (a
 field of no bits is legal, so eight points can share a byte), and no stream more than 4 MiB ahead of the others. The tests write E57 files of their own (`e57` in the module's tests), with
 values that cross packets and pages; the reference survey's 177 MB file reads its 6.6 million points in under two seconds.
 
@@ -130,3 +132,36 @@ from the mesh's origin. The desktop (`gpu.rs`) puts a node on the card the first
 a square `DOT` pixels wide (`vs_point`, two triangles an instance), its corner rounded as the processor rounds it, unlit, with
 depth; its pixels' plane is `POINT`, so `fs_post` draws no edge round it and tints it as the processor does. Picking through the
 mesh finds the nearest point drawn over a pixel (`Mesh::nearest_point`) as the processor's picture would.
+
+## Linked scans
+
+A scan larger than a project holds is linked (`point_cloud`'s `link`, the default for a file over `LINK_ABOVE`, 256 MB; one file,
+no `spacing`), as Revit links a ReCap project: every point of its file is kept in the user's cache (`cloud/cache.rs`), and the
+project keeps only the upper levels of its tree, up to `PREVIEW_POINTS` (a million), to draw where the cache isn't. Its `Cloud`
+holds a `Link`: the file's whole path, the millimetres in its unit, the fingerprint of the file (FNV-1a of its size, when it was
+written, its first and last megabyte, how it's read and the cache's `VERSION`), and how many points it has. A project file holds
+it as the cloud's `link` (format 6; `CloudFile`'s `points` are the preview). The cache is opened the first time something asks
+(`Cloud::store`), found by the fingerprint in `cache::folder()`: `BIMCRAFT_SCAN_CACHE`, else the user's cache folder
+(`%LOCALAPPDATA%\BIMCraft\scans`, `~/Library/Caches/BIMCraft/scans`, `$XDG_CACHE_HOME/bimcraft/scans`); tests and front ends may
+say another (`cache::set_folder`). `Cloud::tree` is then the cache's, and `Cloud::node` a node's points, held (`NodePoints::Held`)
+or loaded from the cache and kept a while (`NodePoints::Loaded`; a `Store` keeps `KEEP`, a gigabyte, and lets go first of the
+blocks asked for longest ago), which is what the 3D view, plans, sections and the graphics card draw from; a load blocks, so a
+picture is always whole. Snapping on a linked scan walks the nodes `reach` touches (`Cloud::nearest_in_tree`). `open` lists the
+linked scans whose cache this machine hasn't (`clouds_not_loaded`), drawn by their preview until `reload_cloud` builds it again
+from the file, as it does when the file has changed (it says `changed`).
+
+The cache is built in bounded memory (`cache::build`): the file is read once to measure it, then once to sort its points into
+the cubes of a grid of up to 16 along a side, each a file of its own beside the cache; a cube with more than `CHUNK_POINTS` (four
+million) is split into its eighths, again and again, and one with fewer is built in memory as any node is (`octree::subtree`).
+The nodes above are built from below, as Potree's converter builds them: each keeps one point in each square of its grid (made
+coarser past `NODE_MAX`) of what its eighths' roots kept, and those leave the roots. A scan held in one chunk is the very tree a
+held scan builds (`a_small_scans_cache_is_the_tree_a_project_builds_in_memory`). The file is a header, the nodes' blocks of points
+(`f32` positions from the cloud's middle, then colours, then a CRC-32), and the table of nodes, root first, with its CRC in the
+header, which has its own; it's written beside its place and put there whole. A cache that's damaged, of another file or version,
+or whose table isn't a tree (a child before its node, or with two) is refused, and built again; a damaged block is drawn as
+nothing. A hundred million points build in about 75 seconds (`a_hundred_million_points_are_built_a_piece_at_a_time`, ignored,
+from a file made as it's read), and a picture's two million of them load in a few tens of milliseconds.
+
+The desktop's Insert > Point Cloud box has Link the file (ticked for a large file), and builds the cache on a thread of its own
+(`cloud::cached`), the box waiting with a spinner, before `point_cloud` runs and finds it; Properties shows a linked scan's file,
+and the right-click menu of a point cloud placing one has Reload Point Cloud, which builds on a thread too.

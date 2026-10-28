@@ -444,3 +444,47 @@ fn the_points_a_view_draws_are_the_users_kept_in_settings() {
     }
     bimcraft_core::view3d::set_drawn(bimcraft_core::view3d::DRAWN);
 }
+
+/// Frames until the scan's cache being built is done, as a user waits for it.
+fn built(h: &mut Harness<BimApp>) {
+    for _ in 0..500 {
+        h.step();
+        if !h.state().building_cloud() {
+            h.run();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the scan's cache took too long");
+}
+
+#[test]
+fn a_scan_linked_from_its_box_keeps_its_points_in_the_cache_and_reloads_from_the_menu() {
+    let folder = std::env::temp_dir().join(format!("bimcraft-ui-scan-cache-{}", std::process::id()));
+    bimcraft_core::cloud::cache::set_folder(Some(folder));
+    let mut h = app(BOX);
+    let path = face("link", "linked.xyz", 0.0);
+    h.state_mut().point_cloud_paths(vec![path.clone()]);
+    h.run();
+    pick(&mut h, Role::CheckBox, "Link the file");
+    press(&mut h, "OK");
+    built(&mut h);
+    let placed = scans(&h);
+    assert_eq!(placed.len(), 1, "{}", h.state().status.text);
+    let cloud = h.state().session.model.clouds.get("linked").unwrap();
+    assert!(cloud.link().is_some() && cloud.loaded());
+    assert_eq!(h.state().selection, placed);
+    assert!(h.query_by_label("Linked File").is_some(), "Properties shows its file");
+    // Reload Point Cloud, on the right-click menu of what places it.
+    let items: Vec<_> = h.state().context_items().into_iter().flatten().map(|i| i.action).collect();
+    assert!(items.contains(&crate::context::Action::ReloadCloud));
+    let before = h.state().session.model.clouds.get("linked").unwrap().count();
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text += "5 0 5
+";
+    std::fs::write(&path, text).unwrap();
+    h.state_mut().act(crate::context::Action::ReloadCloud);
+    built(&mut h);
+    assert!(!h.state().status.error, "{}", h.state().status.text);
+    assert_eq!(h.state().session.model.clouds.get("linked").unwrap().count(), before + 1, "read again from its file");
+}

@@ -1765,8 +1765,12 @@ pub fn element_json(m: &Model, id: Id) -> Value {
         }
         Element::PointCloud(pc) => {
             if let Some(cloud) = m.clouds.get(&pc.cloud) {
-                extra.insert("points".into(), json!(cloud.len()));
+                extra.insert("points".into(), json!(cloud.count()));
                 extra.insert("source".into(), json!(cloud.source()));
+                if let Some(link) = cloud.link() {
+                    extra.insert("linked".into(), json!(link.path()));
+                    extra.insert("loaded".into(), json!(cloud.loaded()));
+                }
                 if !cloud.stations().is_empty() {
                     extra.insert("stations".into(), json!(cloud.stations()));
                 }

@@ -555,6 +555,8 @@ pub struct BimApp {
     cad_dialog: Option<bool>,
     /// Bringing a CAD drawing in: the box, while it's open.
     cad_box: Option<cad::CadBox>,
+    /// A linked scan's cache being built, and what runs when it's done.
+    cloud_job: Option<clouds::CloudJob>,
     /// A selected element's temporary dimension being typed: the element, which of its dimensions (a wall has one, a
     /// door or window two: from its wall's start, from its end), the length so far.
     dim_edit: Option<(Id, usize, String)>,
@@ -1011,6 +1013,7 @@ impl BimApp {
             cloud_box: None,
             cad_dialog: None,
             cad_box: None,
+            cloud_job: None,
             tab_cycle: false,
             held: Vec::new(),
             show_shortcuts: false,

@@ -30,6 +30,8 @@ pub(crate) enum Action {
     OverrideGraphics,
     CreateGroup,
     Ungroup,
+    /// The linked scans the selection places, read again from their files.
+    ReloadCloud,
     Delete,
     /// The linked CAD drawings selected, read again from their files.
     ReloadCad,
@@ -52,6 +54,7 @@ impl Action {
             Action::OverrideGraphics => "Override Graphics",
             Action::CreateGroup => msg!("Create Group"),
             Action::Ungroup => msg!("Ungroup"),
+            Action::ReloadCloud => msg!("Reload Point Cloud"),
             Action::Delete => "Delete",
             Action::ReloadCad => msg!("Reload CAD"),
         }
@@ -134,6 +137,9 @@ impl BimApp {
             if !self.linked_cads().is_empty() {
                 groups.push(vec![Item::new(Action::ReloadCad, true)]);
             }
+            if !self.selected_linked_clouds().is_empty() {
+                groups.push(vec![Item::new(Action::ReloadCloud, !self.building_cloud())]);
+            }
             // What the view on screen hides and paints.
             if self.graphic_view().is_some() {
                 groups.push(vec![
@@ -168,6 +174,7 @@ impl BimApp {
             Action::OverrideGraphics => self.override_selection(),
             Action::CreateGroup => self.create_group(),
             Action::Ungroup => self.ungroup(),
+            Action::ReloadCloud => self.reload_cloud(),
             Action::Delete => self.delete(),
             Action::ReloadCad => {
                 for cad in self.linked_cads() {
