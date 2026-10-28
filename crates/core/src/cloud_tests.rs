@@ -680,8 +680,14 @@ fn a_linked_scan_keeps_every_point_in_the_cache_is_saved_by_its_link_and_reloade
     let h = held.model.clouds.get("face").unwrap();
     for at in [[3.0, 1.0], [997.5, -2.0], [1500.0, 0.0]] {
         let (p, q) = (cloud.nearest(at, 20.0, (-1e6, 1e6)), h.nearest(at, 20.0, (-1e6, 1e6)));
+        // The cache keeps a position to a quarter millimetre.
         let d = |p: Option<[f32; 3]>| p.map(|p| (f64::from(p[0]) - at[0]).hypot(f64::from(p[1]) - at[1]));
-        assert_eq!(d(p), d(q), "{at:?}");
+        assert!(
+            d(p).zip(d(q)).is_none_or(|(a, b)| (a - b).abs() <= 0.25) && d(p).is_some() == d(q).is_some(),
+            "{at:?}: {:?} {:?}",
+            d(p),
+            d(q)
+        );
     }
     // Saved, the project holds its link and the upper levels of its tree, and opens drawing from the cache.
     let file = std::env::temp_dir().join(format!("bimcraft-cloud-{}-link.bimcraft", std::process::id()));

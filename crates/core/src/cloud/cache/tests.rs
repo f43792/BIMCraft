@@ -13,7 +13,8 @@ fn scatter(n: usize) -> Vec<([f64; 3], [u8; 3])> {
     (0..n)
         .map(|i| {
             let wide = if i % 10 < 7 { 2_000.0 } else { 60_000.0 };
-            let p = [next() * wide + 1e5, next() * wide - 3e4, next() * wide * 0.3];
+            // Whole millimetres, so a position packed to quarter millimetres comes back to them.
+            let p = [next() * wide + 1e5, next() * wide - 3e4, next() * wide * 0.3].map(f64::round);
             (p, [(i % 251) as u8, (i % 13) as u8, 200])
         })
         .collect()
@@ -23,14 +24,20 @@ fn xyz(points: &[([f64; 3], [u8; 3])]) -> Vec<u8> {
     points.iter().map(|(p, c)| format!("{:.3} {:.3} {:.3} {} {} {}\n", p[0], p[1], p[2], c[0], c[1], c[2])).collect::<String>().into_bytes()
 }
 
+/// A position from a cloud's middle (a whole or a half millimetre, the scan's being whole), in half millimetres: what a packed
+/// one comes back as.
+fn halves(p: [f32; 3]) -> [i64; 3] {
+    p.map(|v| (f64::from(v) * 2.0).round() as i64)
+}
+
 /// Every node's points, as numbers to compare.
-fn every(store: &Store) -> Vec<([u32; 3], [u8; 3])> {
+fn every(store: &Store) -> Vec<([i64; 3], [u8; 3])> {
     let mut all = Vec::new();
     for n in 0..store.tree().nodes().len() {
         let b = store.block(n);
         assert_eq!(b.points.len(), store.tree().nodes()[n].len(), "node {n}");
         let cs = b.colours.clone().unwrap();
-        all.extend(b.points.iter().zip(cs).map(|(p, c)| (p.map(f32::to_bits), c)));
+        all.extend(b.points.iter().zip(cs).map(|(p, c)| (halves(*p), c)));
     }
     all.sort_unstable();
     all
@@ -54,7 +61,11 @@ fn a_small_scans_cache_is_the_tree_a_project_builds_in_memory() {
         assert_eq!(a.children().collect::<Vec<_>>(), b.children().collect::<Vec<_>>(), "node {n}");
         let block = store.block(n);
         let order = tree.points_of(n);
-        assert_eq!(block.points, order.iter().map(|&i| held.points[i as usize]).collect::<Vec<_>>(), "node {n}");
+        let want: Vec<[f32; 3]> = order.iter().map(|&i| held.points[i as usize]).collect();
+        assert_eq!(block.points.len(), want.len(), "node {n}");
+        // As held, or within half a step where the node packs them.
+        let off = block.points.iter().zip(&want).flat_map(|(a, b)| (0..3).map(move |k| (a[k] - b[k]).abs())).fold(0.0, f32::max);
+        assert!(f64::from(off) <= if a.edge <= 65_535.0 * STEP { STEP / 2.0 + 1e-3 } else { 0.0 }, "node {n}: {off}");
         assert_eq!(block.colours.as_ref().unwrap(), &order.iter().map(|&i| colours[i as usize]).collect::<Vec<_>>());
     }
     assert_eq!(store.points(), 60_000);
@@ -69,8 +80,8 @@ fn a_scan_built_a_piece_at_a_time_keeps_every_point_once_each_in_its_own_node() 
     let pts = scatter(240_000);
     let bytes = xyz(&pts);
     let held = read_from(&bytes.as_slice(), Format::Xyz, &Options { scale: 1.0, spacing: 0.0, cap: usize::MAX }).unwrap();
-    let mut want: Vec<([u32; 3], [u8; 3])> =
-        held.points.iter().zip(held.colours.as_ref().unwrap()).map(|(p, c)| (p.map(f32::to_bits), *c)).collect();
+    let mut want: Vec<([i64; 3], [u8; 3])> =
+        held.points.iter().zip(held.colours.as_ref().unwrap()).map(|(p, c)| (halves(*p), *c)).collect();
     want.sort_unstable();
     let dir = tempfile::tempdir().unwrap();
     // Chunks smaller than a node's inflow, and larger: cubes split again and again, and built in memory with levels of their own.

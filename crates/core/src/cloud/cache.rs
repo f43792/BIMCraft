@@ -9,8 +9,9 @@
 //! converter builds its upper levels.
 //!
 //! The file: a header of [`HEADER`] bytes, the nodes' blocks of points (positions as little-endian `f32` from the cloud's
-//! middle, then their colours as bytes where it has some, then the CRC-32 of both), and the table of nodes, root first, with
-//! its own CRC-32 in the header, which has one too.
+//! middle, or, in a node no wider than [`PACKED`] steps of [`STEP`], as 16-bit steps across its cube, which halves them; then
+//! their colours as bytes where it has some; then the CRC-32 of all of it), and the table of nodes, root first, with its own
+//! CRC-32 in the header, which has one too.
 
 use super::octree::{self, MAX_LEVEL, NODE_MAX, Node, Octree};
 use super::source::{self, Source};
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// What a cache file's layout is: a cache of another is built again.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"BCOCTREE";
 /// The header's bytes.
 const HEADER: usize = 128;
@@ -29,6 +30,10 @@ const HEADER: usize = 128;
 const NODE: usize = 88;
 /// A point's bytes in the files a build sorts them into: its position and its colour.
 const RECORD: usize = 15;
+/// The finest a packed position is, mm: a quarter of a millimetre, finer than a scanner measures.
+pub const STEP: f64 = 0.25;
+/// The steps a packed position takes across its node's cube along each side: a node wider than these many steps keeps `f32`.
+const PACKED: f64 = 65_535.0;
 /// The most points built in memory at once, as one cube's subtree.
 pub const CHUNK_POINTS: usize = 4_000_000;
 /// The most points of a linked scan a project file keeps, the upper levels of its tree, to draw where its cache isn't.
@@ -305,19 +310,26 @@ struct Rec {
     edge: f64,
     spacing: f64,
     level: u8,
+    /// Whether its points' positions are 16-bit steps across its cube.
+    packed: bool,
     len: u32,
     children: [u32; 8],
     block: u64,
 }
 
 impl Rec {
+    /// Whether a node this wide packs its positions in 16 bits.
+    fn packs(edge: f64) -> bool {
+        edge <= PACKED * STEP
+    }
+
     fn write(&self, out: &mut Vec<u8>) {
         for v in self.lo {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&self.edge.to_le_bytes());
         out.extend_from_slice(&self.spacing.to_le_bytes());
-        out.extend_from_slice(&[self.level, 0, 0, 0]);
+        out.extend_from_slice(&[self.level, u8::from(self.packed), 0, 0]);
         out.extend_from_slice(&self.len.to_le_bytes());
         for c in self.children {
             out.extend_from_slice(&c.to_le_bytes());
@@ -337,6 +349,11 @@ impl Rec {
             edge: f64_at(24)?,
             spacing: f64_at(32)?,
             level: *b.get(40)?,
+            packed: match b.get(41)? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            },
             len: u32_at(44)?,
             children,
             block: b.get(80..88).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes)?,
@@ -403,12 +420,20 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    /// Writes the points of a node, and says where.
-    fn block(&mut self, points: &[[f32; 3]], colours: &[[u8; 3]]) -> Result<u64, String> {
+    /// Writes the points of node `index`, packed where it's small enough, and notes where in its record.
+    fn block(&mut self, index: usize, points: &[[f32; 3]], colours: &[[u8; 3]]) -> Result<(), String> {
+        let Some(r) = self.nodes.get(index) else { return Ok(()) };
+        let (lo, edge) = (r.lo, r.edge);
+        let packed = Rec::packs(edge);
         let mut bytes = Vec::with_capacity(points.len() * RECORD + 4);
         for p in points {
-            for v in p {
-                bytes.extend_from_slice(&v.to_le_bytes());
+            for (k, v) in p.iter().enumerate() {
+                if packed {
+                    let q = ((f64::from(*v) - lo[k]) / edge * PACKED).round().clamp(0.0, PACKED) as u16;
+                    bytes.extend_from_slice(&q.to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
             }
         }
         if self.colours {
@@ -419,16 +444,15 @@ impl Builder<'_> {
         let at = self.at;
         self.out.write_all(&bytes).map_err(|e| e.to_string())?;
         self.at += bytes.len() as u64;
-        Ok(at)
+        if let Some(r) = self.nodes.get_mut(index) {
+            (r.len, r.block, r.packed) = (points.len() as u32, at, packed);
+        }
+        Ok(())
     }
 
     /// The root's points, which no node takes.
     fn finish(&mut self, root: Pending) -> Result<(), String> {
-        let at = self.block(&root.points, &root.colours)?;
-        if let Some(r) = self.nodes.get_mut(root.index) {
-            (r.len, r.block) = (root.points.len() as u32, at);
-        }
-        Ok(())
+        self.block(root.index, &root.points, &root.colours)
     }
 
     /// The tree of `part`, whose cube is `lo`, `edge` wide, at `level`: none where it holds no points.
@@ -555,10 +579,7 @@ impl Builder<'_> {
                 // Nothing of it is left: the node above has all it had.
                 continue;
             }
-            let at = self.block(&left, &left_colours)?;
-            if let Some(r) = self.nodes.get_mut(p.index) {
-                (r.len, r.block) = (left.len() as u32, at);
-            }
+            self.block(p.index, &left, &left_colours)?;
             children[k] = p.index as u32;
         }
         if let Some(r) = self.nodes.get_mut(index) {
@@ -600,10 +621,7 @@ impl Builder<'_> {
             let order = tree.points_of(i);
             let ps: Vec<[f32; 3]> = order.iter().filter_map(|&j| points.get(j as usize).copied()).collect();
             let cs: Vec<[u8; 3]> = order.iter().filter_map(|&j| colours.get(j as usize).copied()).collect();
-            let at = self.block(&ps, &cs)?;
-            if let Some(r) = self.nodes.get_mut(base + i) {
-                (r.len, r.block) = (ps.len() as u32, at);
-            }
+            self.block(base + i, &ps, &cs)?;
         }
         let order = tree.points_of(0);
         Ok(Some(Pending {
@@ -627,7 +645,8 @@ pub struct Store {
     file: source::FileSource,
     header: Header,
     tree: Octree,
-    blocks: Vec<u64>,
+    /// Where each node's block is, and whether its positions are packed.
+    blocks: Vec<(u64, bool)>,
     points: u64,
     kept: Mutex<Kept>,
 }
@@ -686,7 +705,7 @@ impl Store {
         if crc(&table) != u32_at(84) {
             return Err("its table is damaged".into());
         }
-        let per = RECORD as u64 - if header.colours { 0 } else { 3 };
+        let colour = if header.colours { 3 } else { 0 };
         let (mut nodes, mut blocks, mut points) = (Vec::with_capacity(count), Vec::with_capacity(count), 0_u64);
         let mut parented = vec![false; count];
         for (i, b) in table.as_chunks::<NODE>().0.iter().enumerate() {
@@ -698,7 +717,11 @@ impl Store {
                 && r.spacing.is_finite()
                 && r.spacing >= 0.0
                 && r.level <= MAX_LEVEL
-                && (r.len as u64).checked_mul(per).and_then(|b| b.checked_add(r.block + 4)).is_some_and(|end| end <= size)
+                && r.packed == Rec::packs(r.edge)
+                && (r.len as u64)
+                    .checked_mul(if r.packed { 6 } else { 12 } + colour)
+                    .and_then(|b| b.checked_add(r.block + 4))
+                    .is_some_and(|end| end <= size)
                 && (r.len == 0 || r.block >= HEADER as u64);
             if !fine {
                 return Err(format!("its node {i} isn't one"));
@@ -711,7 +734,7 @@ impl Store {
                 }
             }
             points += u64::from(r.len);
-            blocks.push(r.block);
+            blocks.push((r.block, r.packed));
             nodes.push(Node::kept(r.lo, r.edge, r.spacing, r.level, r.len as usize, r.children));
         }
         if points > MAX_POINTS {
@@ -761,16 +784,25 @@ impl Store {
 
     fn load(&self, node: usize) -> Option<Block> {
         let len = self.tree.nodes().get(node)?.len();
-        let at = *self.blocks.get(node)?;
-        let colours = if self.header.colours { len * 3 } else { 0 };
-        let bytes = source::take(&self.file, at, len * 12 + colours + 4).ok()?;
-        let (body, sum) = bytes.split_at(len * 12 + colours);
+        let n = self.tree.nodes().get(node)?;
+        let (at, packed) = *self.blocks.get(node)?;
+        let (per, colours) = (if packed { 6 } else { 12 }, if self.header.colours { len * 3 } else { 0 });
+        let bytes = source::take(&self.file, at, len * per + colours + 4).ok()?;
+        let (body, sum) = bytes.split_at(len * per + colours);
         if sum.try_into().map(u32::from_le_bytes).ok()? != crc(body) {
             return None;
         }
-        let (ps, cs) = body.split_at(len * 12);
-        let points =
-            ps.as_chunks::<12>().0.iter().map(|c| [0, 4, 8].map(|i| f32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]))).collect();
+        let (ps, cs) = body.split_at(len * per);
+        let points = if packed {
+            let (lo, step) = (n.lo, n.edge / PACKED);
+            ps.as_chunks::<6>()
+                .0
+                .iter()
+                .map(|c| [0, 1, 2].map(|k| (lo[k] + f64::from(u16::from_le_bytes([c[2 * k], c[2 * k + 1]])) * step) as f32))
+                .collect()
+        } else {
+            ps.as_chunks::<12>().0.iter().map(|c| [0, 4, 8].map(|i| f32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]))).collect()
+        };
         let colours = self.header.colours.then(|| cs.as_chunks::<3>().0.to_vec());
         Some(Block { points, colours })
     }

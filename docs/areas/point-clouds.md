@@ -156,11 +156,13 @@ million) is split into its eighths, again and again, and one with fewer is built
 The nodes above are built from below, as Potree's converter builds them: each keeps one point in each square of its grid (made
 coarser past `NODE_MAX`) of what its eighths' roots kept, and those leave the roots. A scan held in one chunk is the very tree a
 held scan builds (`a_small_scans_cache_is_the_tree_a_project_builds_in_memory`). The file is a header, the nodes' blocks of points
-(`f32` positions from the cloud's middle, then colours, then a CRC-32), and the table of nodes, root first, with its CRC in the
-header, which has its own; it's written beside its place and put there whole. A cache that's damaged, of another file or version,
+(positions from the cloud's middle, then colours, then a CRC-32), and the table of nodes, root first, with its CRC in the
+header, which has its own. A node no wider than 65,535 quarter millimetres (`STEP`, about 16 m: every node but the few at the
+top of a large scan) packs its positions as 16-bit steps across its cube, half of `f32`'s bytes, and a quarter millimetre is
+finer than a scanner measures; the others keep `f32`. The file is written beside its place and put there whole. A cache that's damaged, of another file or version,
 or whose table isn't a tree (a child before its node, or with two) is refused, and built again; a damaged block is drawn as
-nothing. A hundred million points build in about 75 seconds (`a_hundred_million_points_are_built_a_piece_at_a_time`, ignored,
-from a file made as it's read), and a picture's two million of them load in a few tens of milliseconds.
+nothing. A hundred million points build in about 70 seconds into 860 MB (`a_hundred_million_points_are_built_a_piece_at_a_time`,
+ignored, from a file made as it's read), and a picture's two million of them load in under twenty milliseconds.
 
 The desktop's Insert > Point Cloud box has Link the file (ticked for a large file), and builds the cache on a thread of its own
 (`cloud::cached`), the box waiting with a spinner, before `point_cloud` runs and finds it; Properties shows a linked scan's file,
