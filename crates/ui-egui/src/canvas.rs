@@ -508,7 +508,10 @@ fn ghost(p: &Painter, origin: Pos2, d: &Drawing, selected: &[Id], f: &dyn Fn(Pos
             Prim::Line { pts, .. } => {
                 p.add(Shape::line(pts.iter().map(at).collect(), stroke));
             }
-            Prim::Image { .. } => {}
+            // A scan's picture: its box, as Revit outlines a point cloud it moves.
+            Prim::Image { .. } => {
+                p.add(Shape::closed_line(prim.points().iter().map(at).collect(), stroke));
+            }
         }
     }
 }

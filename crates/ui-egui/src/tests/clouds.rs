@@ -42,6 +42,48 @@ fn a_scans_cache_being_built_shows_how_far_it_has_got_on_a_gauge_in_its_box() {
 }
 
 #[test]
+fn move_and_rotate_take_a_scan_picked_in_the_plan_snapping_to_its_points() {
+    let path = face("modify", "face.xyz", 0.0);
+    let mut h = app(&format!("point_cloud {}", json!({"path": path, "origin": "file"})));
+    let id = scans(&h)[0];
+    let placed = |h: &Harness<BimApp>| match h.state().session.model.elements.get(id) {
+        Some(Element::PointCloud(pc)) => (pc.at, pc.angle),
+        _ => panic!("the scan is gone"),
+    };
+    let (before, _) = placed(&h);
+    // A click on its points picks it.
+    click(&mut h, P2(1000.0, 0.0));
+    assert_eq!(h.state().selection, [id]);
+    // Move's base point snaps to one of its points, a measured spot to move from.
+    shortcut(&mut h, "MV");
+    let found = hover(&mut h, P2(1012.0, 9.0)).expect("a snap on the scan");
+    assert_eq!((found.at, found.kind), (P2(1000.0, 0.0), bimcraft_core::snap::Kind::Point));
+    click(&mut h, P2(1012.0, 9.0));
+    // Where it would go is outlined before the click puts it there, as anything moved is.
+    hover(&mut h, P2(3000.0, 2500.0));
+    let aim = h.state().screen(P2(3000.0, 2500.0));
+    let outlined = previewed(&h).iter().any(|o| {
+        let middle = o.iter().fold(egui::Vec2::ZERO, |a, p| a + p.to_vec2()) / o.len() as f32;
+        o.len() == 4 && (middle - aim.to_vec2()).length() < 3.0
+    });
+    assert!(outlined, "{:?} about {aim:?}", previewed(&h));
+    click(&mut h, P2(3000.0, 2500.0));
+    let (moved, _) = placed(&h);
+    assert_eq!(moved - before, P2(2000.0, 2500.0), "{}", h.state().status.text);
+    assert_eq!(h.state().selection, [id], "it stays selected");
+    // Rotate turns it about its middle, a quarter turn.
+    shortcut(&mut h, "RO");
+    let Tool::Rotate { centre, .. } = h.state().tool else { panic!("{:?}", h.state().tool) };
+    click(&mut h, centre + P2(0.0, -1500.0));
+    click(&mut h, centre + P2(1500.0, 0.0));
+    let (turned, angle) = placed(&h);
+    assert_eq!(angle, 90.0, "{}", h.state().status.text);
+    let back = turned - centre;
+    let was = moved - centre;
+    assert!((back.0 + was.1).abs() < 1e-6 && (back.1 - was.0).abs() < 1e-6, "{turned:?} about {centre:?}");
+}
+
+#[test]
 fn insert_point_cloud_brings_the_files_picked_in_as_one_scan_and_selects_it() {
     let mut h = app(BOX);
     press(&mut h, "Insert");
@@ -97,6 +139,24 @@ fn properties_show_a_scan_and_move_it() {
     h.run();
     let Some(Element::PointCloud(pc)) = h.state().session.model.elements.get(id) else { panic!() };
     assert_eq!(pc.offset, 500.0);
+}
+
+/// The accent-coloured closed outlines drawn over the view: what a tool previews.
+fn previewed(h: &Harness<BimApp>) -> Vec<Vec<egui::Pos2>> {
+    fn walk(s: &egui::Shape, out: &mut Vec<Vec<egui::Pos2>>) {
+        match s {
+            egui::Shape::Path(p) if p.closed && p.stroke.color == egui::epaint::ColorMode::Solid(crate::style::pal().accent) => {
+                out.push(p.points.clone())
+            }
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    let view = h.state().view_rect;
+    out.retain(|o| o.iter().all(|p| view.contains(*p)));
+    out
 }
 
 /// The fill the active plan's graphics give point clouds, and whether they halftone them.

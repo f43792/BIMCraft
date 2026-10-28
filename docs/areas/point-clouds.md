@@ -100,6 +100,9 @@ the units of its coordinates, a spacing, and Revit's positioning, Auto - Center 
 `point_cloud` on the level of the plan on screen and selects what it placed; a refusal stays in the box with its reason
 (`point_cloud_paths` opens the box, what a test hands the files to). The Properties palette shows a point cloud's level and offset
 (edited), its scan, file and points, its origin and angle; Visibility/Graphics lists `pointcloud` after the model's categories.
+A click on a scan's points in a plan selects it, and Move, Copy and Rotate take it as they take anything, their points snapping
+to its points (`Kind::Point`), so a scan is moved from a spot it measured; while it moves, the box of its picture is outlined
+where it would go (`canvas::ghost`). Sections and the 3D view don't move it yet, as they move nothing.
 
 ## Levels of detail
 
