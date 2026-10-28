@@ -117,6 +117,50 @@ fn move_in_a_section_takes_a_scan_along_its_line_and_up() {
 }
 
 #[test]
+fn a_scan_selected_in_the_3d_view_moves_along_its_arrows_and_turns_by_its_handle() {
+    let path = face("grips", "face.xyz", 0.0);
+    let mut h = app(&format!("point_cloud {}", json!({"path": path, "origin": "file"})));
+    let id = scans(&h)[0];
+    let placed = |h: &Harness<BimApp>| match h.state().session.model.elements.get(id) {
+        Some(Element::PointCloud(pc)) => (pc.at, pc.offset, pc.angle),
+        _ => panic!("the scan is gone"),
+    };
+    let grips = |h: &Harness<BimApp>| {
+        let s = h.state();
+        let cam = s.orbit.camera.expect("the 3D view has shown");
+        crate::clouds::scan_grips(&s.session.model, &s.selection, &cam, 1.0).expect("its grips").2
+    };
+    press(&mut h, "Default 3D View");
+    h.state_mut().selection = vec![id];
+    h.run();
+    let (at, offset, angle) = placed(&h);
+    let (camera, steps) = (h.state().orbit.camera, h.state().session.history().len());
+    // East along its x arrow, a metre.
+    let g = grips(&h);
+    let (a, b) = (h.state().screen3(g[0]), h.state().screen3([g[0][0] + 1000.0, g[0][1], g[0][2]]));
+    drag_screen(&mut h, a, b, PointerButton::Primary);
+    let (now, ..) = placed(&h);
+    assert!((now.0 - at.0 - 1000.0).abs() <= 20.0 && now.1 == at.1, "{now:?} from {at:?}");
+    assert_eq!(h.state().orbit.camera, camera, "the grip took the drag, not the camera");
+    // Up its z arrow, half a metre.
+    let g = grips(&h);
+    let (a, b) = (h.state().screen3(g[2]), h.state().screen3([g[2][0], g[2][1], g[2][2] + 500.0]));
+    drag_screen(&mut h, a, b, PointerButton::Primary);
+    let (_, up, _) = placed(&h);
+    assert!((up - offset - 500.0).abs() <= 20.0, "{up} from {offset}");
+    // A quarter turn round its middle, by the handle.
+    let g = grips(&h);
+    let mid = [g[2][0], g[2][1], g[0][2]];
+    let (x, y) = (g[3][0] - mid[0], g[3][1] - mid[1]);
+    let (a, b) = (h.state().screen3(g[3]), h.state().screen3([mid[0] - y, mid[1] + x, mid[2]]));
+    drag_screen(&mut h, a, b, PointerButton::Primary);
+    let (_, _, turned) = placed(&h);
+    assert!((turned - angle - 90.0).abs() <= 1.0, "{turned} from {angle}");
+    assert_eq!(h.state().session.history().len(), steps + 3, "a step each");
+    assert_eq!(h.state().selection, [id]);
+}
+
+#[test]
 fn insert_point_cloud_brings_the_files_picked_in_as_one_scan_and_selects_it() {
     let mut h = app(BOX);
     press(&mut h, "Insert");

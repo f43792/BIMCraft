@@ -177,6 +177,30 @@ fn a_scan_is_brought_in_once_and_placed_as_often_as_wanted() {
 }
 
 #[test]
+fn a_scans_grips_stand_round_its_middle_and_a_drag_about_it_turns_whole_degrees() {
+    use crate::view3d::{scan_grips, turned_by};
+    let b = ([0.0, 0.0, 0.0], [4000.0, 2000.0, 1000.0]);
+    let g = scan_grips(b, 0.0, 500.0);
+    // Arrows along x, y and z from its middle.
+    assert_eq!(&g[..3], &[[2500.0, 1000.0, 500.0], [2000.0, 1500.0, 500.0], [2000.0, 1000.0, 1000.0]]);
+    // The handle that turns it, on its heading turned 225°: clear of the arrows, and going round with it.
+    let heading = |g: [f64; 3]| (g[1] - 1000.0).atan2(g[0] - 2000.0).to_degrees();
+    let reach = |g: [f64; 3]| (g[0] - 2000.0).hypot(g[1] - 1000.0);
+    assert!((heading(g[3]) + 135.0).abs() < 1e-9 && (reach(g[3]) - 500.0).abs() < 1e-9 && g[3][2] == 500.0, "{:?}", g[3]);
+    assert!((heading(scan_grips(b, 90.0, 500.0)[3]) + 45.0).abs() < 1e-9);
+    let c = [2000.0, 1000.0, 500.0];
+    let on = |deg: f64| {
+        let (s, k) = deg.to_radians().sin_cos();
+        [c[0] + 700.0 * k, c[1] + 700.0 * s, 500.0]
+    };
+    assert_eq!(turned_by(c, on(0.0), on(90.0)), 90.0);
+    assert_eq!(turned_by(c, on(90.0), on(0.0)), -90.0);
+    assert_eq!(turned_by(c, on(170.0), on(190.0)), 20.0, "across the half turn");
+    assert_eq!(turned_by(c, on(10.0), on(10.4)), 0.0, "to whole degrees");
+    assert_eq!(turned_by(c, c, on(45.0)), 0.0, "from its middle, no way round");
+}
+
+#[test]
 fn move_up_lifts_a_scan_and_what_sits_at_one_height_but_not_a_wall() {
     let mut s = Session::new();
     let id = run(&mut s, "point_cloud", json!({"path": scan("lift", "box.xyz", BOX)}))["id"].as_u64().unwrap();

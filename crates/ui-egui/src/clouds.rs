@@ -1,21 +1,111 @@
 //! Point clouds: Insert > Point Cloud asks for scan files, then a box for how to bring them in (name, units, spacing,
 //! positioning, as Revit's Link Point Cloud asks), and runs `point_cloud`. A linked scan's cache is built on a thread of its
 //! own first (`cloud::cached`), since a large file takes a while, and the command run when it's done finds it at once;
-//! Reload Point Cloud, on the right-click menu, does the same for `reload_cloud`.
+//! Reload Point Cloud, on the right-click menu, does the same for `reload_cloud`. A scan selected alone in the 3D view has
+//! grips (`orbit.rs` drags them): arrows that move it along x, y and z, and a handle that turns it about its middle.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use bimcraft_core::cloud::{self, cache::Progress};
-use bimcraft_core::model::Element;
-use egui::{Align, Button, Context, Grid, Id as UiId, Layout, Modal, ProgressBar, RichText, TextEdit};
+use bimcraft_core::model::{Element, Id, Model};
+use bimcraft_core::view3d::{self, Camera, P3, box_edges};
+use egui::{
+    Align, Button, Context, Grid, Id as UiId, Layout, Modal, Painter, Pos2, ProgressBar, Rect, RichText, Shape, Stroke, StrokeKind,
+    TextEdit, vec2,
+};
 use serde_json::{Value, json};
 
 use crate::BimApp;
 use crate::lang::{t, tf};
 use crate::properties::number;
 use crate::style::pal;
+
+/// How far from a selected scan's middle its grips in the 3D view stand, in points.
+const SCAN_REACH: f32 = 60.0;
+
+/// A scan selected alone (`selection`): it, the box its points fill, and where its grips are in the 3D view through `cam`
+/// (`ppp` pixels a point), as `view3d::scan_grips` orders them.
+pub(crate) fn scan_grips(m: &Model, selection: &[Id], cam: &Camera, ppp: f32) -> Option<(Id, (P3, P3), [P3; 4])> {
+    let &[id] = selection else { return None };
+    let Some(Element::PointCloud(pc)) = m.elements.get(id) else { return None };
+    let b = m.cloud_box(id)?;
+    Some((id, b, view3d::scan_grips(b, pc.angle, f64::from(SCAN_REACH * ppp) / cam.scale)))
+}
+
+fn middle((lo, hi): (P3, P3)) -> P3 {
+    std::array::from_fn(|i| (lo[i] + hi[i]) / 2.0)
+}
+
+/// What a drag on the picture from pixel `from` to pixel `to` does with grip `k` of a scan whose box is `b`: mm along x, y or
+/// z for an arrow (to 10 mm), whole degrees about its middle for the handle.
+pub(crate) fn grip_drag(cam: &Camera, b: (P3, P3), k: usize, from: (f64, f64), to: (f64, f64)) -> f64 {
+    if k < 3 {
+        return (cam.along(k, from, to).unwrap_or(0.0) / 10.0).round() * 10.0;
+    }
+    let mid = middle(b);
+    match (cam.on_plane(from, mid[2]), cam.on_plane(to, mid[2])) {
+        (Some(a), Some(z)) => view3d::turned_by(mid, a, z),
+        _ => 0.0,
+    }
+}
+
+/// Point `p` of a scan whose box is `b`, where a drag `by` on grip `k` leaves it.
+fn dragged(b: (P3, P3), k: usize, by: f64, mut p: P3) -> P3 {
+    if k < 3 {
+        p[k] += by;
+        return p;
+    }
+    let (mid, (sin, cos)) = (middle(b), by.to_radians().sin_cos());
+    let (x, y) = (p[0] - mid[0], p[1] - mid[1]);
+    [mid[0] + x * cos - y * sin, mid[1] + x * sin + y * cos, p[2]]
+}
+
+/// What a drag `by` on grip `k` of scan `id`, whose box is `b`, runs: `move` along an arrow (`up` for z), `rotate` about its
+/// middle for the handle; nothing for no way at all.
+pub(crate) fn grip_command(id: Id, b: (P3, P3), k: usize, by: f64) -> Option<(&'static str, Value)> {
+    if by == 0.0 || !by.is_finite() {
+        return None;
+    }
+    let mid = middle(b);
+    Some(match k {
+        0 => ("move", json!({"ids": [id], "by": [by, 0.0]})),
+        1 => ("move", json!({"ids": [id], "by": [0.0, by]})),
+        2 => ("move", json!({"ids": [id], "up": by})),
+        _ => ("rotate", json!({"ids": [id], "about": [mid[0], mid[1]], "angle": by})),
+    })
+}
+
+/// A selected scan's box and grips over the 3D view, as the drag `held` (its grip, and how far) would leave them: an arrow on a
+/// stem from its middle along each axis (a square for one pointing at the camera), and a ring for the handle that turns it.
+pub(crate) fn draw_scan_grips(p: &Painter, b: (P3, P3), grips: [P3; 4], held: Option<(usize, f64)>, screen: impl Fn(P3) -> Pos2) {
+    let at = |q: P3| screen(held.map_or(q, |(k, by)| dragged(b, k, by, q)));
+    let edge = Stroke::new(1.0, if held.is_some() { pal().accent } else { pal().muted });
+    for [a, z] in box_edges(b) {
+        p.line_segment([at(a), at(z)], edge);
+    }
+    let mid = at(middle(b));
+    let stroke = Stroke::new(1.5, pal().accent);
+    for (k, g) in grips.into_iter().enumerate() {
+        let tip = at(g);
+        let fill = if held.is_some_and(|(h, _)| h == k) { pal().accent } else { pal().surface };
+        if k == 3 {
+            p.circle(tip, 5.5, fill, stroke);
+            continue;
+        }
+        let d = tip - mid;
+        if d.length() < 0.25 {
+            let r = Rect::from_center_size(tip, vec2(9.0, 9.0));
+            p.rect_filled(r, 1.0, fill);
+            p.rect_stroke(r, 1.0, stroke, StrokeKind::Middle);
+            continue;
+        }
+        let (u, n) = (d.normalized(), d.normalized().rot90());
+        p.line_segment([mid, tip], stroke);
+        p.add(Shape::convex_polygon(vec![tip + u * 12.0, tip - u * 2.0 + n * 6.0, tip - u * 2.0 - n * 6.0], fill, stroke));
+    }
+}
 
 /// The units a scan's coordinates may be in, as `point_cloud` names them.
 const UNITS: [&str; 5] = ["m", "mm", "cm", "in", "ft"];

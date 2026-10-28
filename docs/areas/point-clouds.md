@@ -104,8 +104,11 @@ A click on a scan's points in a plan selects it, and Move, Copy and Rotate take 
 to its points (`Kind::Point`), so a scan is moved from a spot it measured; while it moves, the box of its picture is outlined
 where it would go (`canvas::ghost`). In a section or an elevation, Move takes it along the view's line and up
 (`section::move_in_section`, a line from the base point to the cursor): `move`'s `up` changes its offset, as it does what else
-sits at one height (`commands::lifted`: components, floors, ceilings, roofs), and refuses the rest, a wall with it. The 3D view
-doesn't move it yet.
+sits at one height (`commands::lifted`: components, floors, ceilings, roofs), and refuses the rest, a wall with it. In the 3D
+view a scan selected alone has grips (`view3d::scan_grips`, drawn and dragged by `clouds.rs` and `orbit.rs`): an arrow along
+each of x, y and z from the middle of its box, a drag on which runs `move` (`up` for z) to 10 mm, and a ring on its heading
+turned 225°, a drag on which turns it about its middle (`rotate`, to whole degrees, `view3d::turned_by`); its box shows where
+it goes as the drag does, and each drag is one undo.
 
 ## Levels of detail
 

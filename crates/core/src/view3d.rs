@@ -1721,6 +1721,28 @@ pub fn box_edges((lo, hi): (P3, P3)) -> Vec<[P3; 2]> {
     (0..8).flat_map(|n| (0..3).filter(move |i| n >> i & 1 == 0).map(move |i| [corner(n), corner(n | 1 << i)])).collect()
 }
 
+/// Where the grips of a scan selected in the 3D view are, round the box `(lo, hi)` its points fill, the scan turned `angle`
+/// degrees, `reach` mm from the box's middle: arrows along x, y and z, which a drag moves it along, and a handle on its heading
+/// turned 225° (between -x and -y, clear of the arrows), which a drag turns it with about its middle.
+pub fn scan_grips((lo, hi): (P3, P3), angle: f64, reach: f64) -> [P3; 4] {
+    let mid: P3 = std::array::from_fn(|i| (lo[i] + hi[i]) / 2.0);
+    let (sin, cos) = (angle + 225.0).to_radians().sin_cos();
+    let arrow = |k: usize| -> P3 { std::array::from_fn(|i| mid[i] + if i == k { reach } else { 0.0 }) };
+    [arrow(0), arrow(1), arrow(2), [mid[0] + reach * cos, mid[1] + reach * sin, mid[2]]]
+}
+
+/// The degrees, counter-clockwise and to whole ones, that a drag from `from` to `to` turns about `about`, seen from above:
+/// within a half turn either way, and none from the middle itself.
+pub fn turned_by(about: P3, from: P3, to: P3) -> f64 {
+    let heading = |p: P3| (p[1] - about[1]).atan2(p[0] - about[0]).to_degrees();
+    let near = |p: P3| (p[0] - about[0]).hypot(p[1] - about[1]) < 1e-6;
+    if near(from) || near(to) {
+        return 0.0;
+    }
+    let d = (heading(to) - heading(from) + 180.0).rem_euclid(360.0) - 180.0;
+    d.round()
+}
+
 /// Section box `b` with face `k` (as [`box_grips`] orders them) moved `by` mm along its axis, to 10 mm, stopping
 /// [`MIN_SECTION_BOX`](crate::model::MIN_SECTION_BOX) short of the face across from it.
 pub fn move_box_face((mut lo, mut hi): (P3, P3), k: usize, by: f64) -> (P3, P3) {

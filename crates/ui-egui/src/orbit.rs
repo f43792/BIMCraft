@@ -4,7 +4,8 @@
 //! click picks the element the picture shows there, and so does a press let go quickly, however
 //! far the hand went with it (`Canvas::quick_press`): the camera it turned goes back. A level
 //! selected alone has a grip at the middle of each edge of its plane, which a drag moves over it. A section box is drawn
-//! round what it keeps, with a grip on each face in Modify that a drag moves along its axis (`section_box.rs`).
+//! round what it keeps, with a grip on each face in Modify that a drag moves along its axis (`section_box.rs`). A scan selected
+//! alone has arrows that a drag moves it along and a handle that turns it (`clouds.rs`).
 
 use std::sync::Arc;
 
@@ -74,6 +75,8 @@ pub struct Orbit {
     grip: Option<(Id, usize)>,
     /// A section box's grip being dragged: which face (as `view3d::box_grips` orders them), and where the drag began.
     boxing: Option<(usize, Pos2)>,
+    /// A selected scan's grip being dragged: which (as `view3d::scan_grips` orders them), and where the drag began.
+    scanning: Option<(usize, Pos2)>,
 }
 
 impl Default for Orbit {
@@ -92,6 +95,7 @@ impl Default for Orbit {
             before: None,
             grip: None,
             boxing: None,
+            scanning: None,
         }
     }
 }
@@ -219,12 +223,38 @@ impl BimApp {
         {
             moved = Some((id, to));
         }
+        // A scan selected alone, in Modify: a drag from one of its arrows moves it along that axis, from its handle turns it
+        // about its middle; its box shows where it goes, and the command runs when the drag ends.
+        let scan = if modify { crate::clouds::scan_grips(&model, &selection, &cam, ppp) } else { None };
+        if let Some((_, _, g)) = scan
+            && o.grip.is_none()
+            && response.drag_started_by(PointerButton::Primary)
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+            && let Some(k) = g.iter().position(|q| on_screen(&cam, rect, ppp, *q).distance(origin) <= crate::section_box::GRIP)
+        {
+            o.scanning = Some((k, origin));
+        }
+        if scan.is_none() {
+            o.scanning = None;
+        }
+        let rescanned = match (scan, o.scanning, latest) {
+            (Some((_, b, _)), Some((k, from)), Some(now)) => Some((k, crate::clouds::grip_drag(&cam, b, k, px(from), px(now)))),
+            _ => None,
+        };
+        let mut scanned = None;
+        if response.drag_stopped()
+            && let (Some(_), Some((k, by)), Some((id, b, _))) = (o.scanning.take(), rescanned, scan)
+            && !self.canvas.quick()
+        {
+            scanned = crate::clouds::grip_command(id, b, k, by);
+        }
         // The section box, while it's on; in Modify a drag from one of its grips moves that face along its axis, and the view
         // shows the cut as it goes. The command runs when the drag ends.
         let boxed = Look::of_3d(&model).section_box();
         if let Some(b) = boxed
             && modify
             && o.grip.is_none()
+            && o.scanning.is_none()
             && response.drag_started_by(PointerButton::Primary)
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
             && let Some(k) = crate::section_box::grip_at(b, origin, |p| on_screen(&cam, rect, ppp, p))
@@ -250,6 +280,7 @@ impl BimApp {
         if response.drag_started()
             && o.grip.is_none()
             && o.boxing.is_none()
+            && o.scanning.is_none()
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         {
             o.drag = Some((response.dragged_by(PointerButton::Primary) || shift, origin));
@@ -286,8 +317,10 @@ impl BimApp {
             let (x, y) = px(at);
             picker.as_ref().and_then(|p| p.at(&cam, x, y))
         };
-        let hovered =
-            hover.filter(|_| (modify || demolish || paint || unpaint) && o.drag.is_none()).and_then(|at| pick(&o.picker, at)).map(|h| h.id);
+        let hovered = hover
+            .filter(|_| (modify || demolish || paint || unpaint) && o.drag.is_none() && o.scanning.is_none() && o.boxing.is_none())
+            .and_then(|at| pick(&o.picker, at))
+            .map(|h| h.id);
         let tints: Vec<(Id, Rgb)> = selection
             .iter()
             .map(|id| (*id, rgb(canvas_pal().accent)))
@@ -373,9 +406,14 @@ impl BimApp {
         if let Some(b) = reboxed.or(boxed) {
             crate::section_box::draw(&p, &cam, b, modify, o.boxing.map(|(k, _)| k), screen);
         }
+        if let Some((_, b, g)) = scan {
+            crate::clouds::draw_scan_grips(&p, b, g, rescanned.filter(|_| o.scanning.is_some()), screen);
+        }
         // A click on a grip picks nothing behind it.
         let click = response.clicked().then(|| response.interact_pointer_pos()).flatten().or(self.canvas.quick_press());
         let click = click.filter(|at| !boxed.is_some_and(|b| modify && crate::section_box::grip_at(b, *at, screen).is_some()));
+        let click =
+            click.filter(|at| !scan.is_some_and(|(_, _, g)| g.iter().any(|q| screen(*q).distance(*at) <= crate::section_box::GRIP)));
         let clicked = click.map(|at| pick(&o.picker, at).map(|h| h.id));
         // The face of what's clicked, as paint names the faces of an element.
         let face = click.and_then(|at| pick(&o.picker, at).map(|h| h.face).filter(|f| !f.is_empty()));
@@ -397,6 +435,9 @@ impl BimApp {
         }
         if let Some((lo, hi)) = boxed_to {
             self.run("section_box", json!({"min": lo, "max": hi}));
+        }
+        if let Some((c, params)) = scanned {
+            self.run(c, params);
         }
         // The navigation bar, at the view's top right: Home (Revit's default orientation), fit, zoom.
         let bar = Rect::from_min_size(self.nav_corner(rect), vec2(32.0, 104.0));
