@@ -4,11 +4,12 @@
 //! Reload Point Cloud, on the right-click menu, does the same for `reload_cloud`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-use bimcraft_core::cloud;
+use bimcraft_core::cloud::{self, cache::Progress};
 use bimcraft_core::model::Element;
-use egui::{Align, Button, Context, Grid, Id as UiId, Layout, Modal, RichText, TextEdit};
+use egui::{Align, Button, Context, Grid, Id as UiId, Layout, Modal, ProgressBar, RichText, TextEdit};
 use serde_json::{Value, json};
 
 use crate::BimApp;
@@ -37,6 +38,8 @@ pub(crate) struct CloudBox {
 /// A linked scan's cache being built, and what to run when it's done.
 pub(crate) struct CloudJob {
     done: Receiver<Result<(), String>>,
+    /// How far it has got, for the gauge.
+    progress: Arc<Progress>,
     then: Then,
 }
 
@@ -47,13 +50,15 @@ enum Then {
     Reload(String),
 }
 
-/// Builds the cache of the file at `path` on a thread of its own.
-fn build(path: PathBuf, format: cloud::Format, scale: f64) -> Receiver<Result<(), String>> {
+/// Builds the cache of the file at `path` on a thread of its own, and then runs `then`.
+fn build(path: PathBuf, format: cloud::Format, scale: f64, then: Then) -> CloudJob {
     let (tx, rx) = std::sync::mpsc::channel();
+    let progress = Arc::new(Progress::default());
+    let building = Arc::clone(&progress);
     std::thread::spawn(move || {
-        let _ = tx.send(cloud::cached(&path, format, scale).map(|_| ()));
+        let _ = tx.send(cloud::cached(&path, format, scale, &building).map(|_| ()));
     });
-    rx
+    CloudJob { done: rx, progress, then }
 }
 
 impl BimApp {
@@ -74,7 +79,8 @@ impl BimApp {
 
     pub(crate) fn point_cloud_window(&mut self, ctx: &Context) {
         self.poll_cloud_job(ctx);
-        let building = self.cloud_job.as_ref().is_some_and(|j| matches!(j.then, Then::Insert(_)));
+        let gauge = self.cloud_job.as_ref().filter(|j| matches!(j.then, Then::Insert(_))).map(|j| j.progress.fraction());
+        let building = gauge.is_some();
         let Some(b) = self.cloud_box.as_mut() else { return };
         let (mut ok, mut close) = (false, false);
         let r = Modal::new(UiId::new("point-cloud")).show(ctx, |ui| {
@@ -121,12 +127,10 @@ impl BimApp {
                 ui.add_space(6.0);
                 ui.label(RichText::new(e).color(pal().error));
             }
-            if building {
+            if let Some(f) = gauge {
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(t("Building the scan's cache…"));
-                });
+                ui.label(t("Building the scan's cache…"));
+                ui.add(ProgressBar::new(f).show_percentage());
             }
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -147,6 +151,10 @@ impl BimApp {
         let result = match job.done.try_recv() {
             Ok(r) => r,
             Err(TryRecvError::Empty) => {
+                if matches!(job.then, Then::Reload(_)) {
+                    let done = (job.progress.fraction() * 100.0).floor();
+                    self.status = crate::Status { text: format!("{} {done}%", t("Building the scan's cache…")), error: false };
+                }
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
                 return;
             }
@@ -170,6 +178,15 @@ impl BimApp {
     /// Whether a linked scan's cache is being built.
     pub(crate) fn building_cloud(&self) -> bool {
         self.cloud_job.is_some()
+    }
+
+    /// A build for the box's scan that a test moves on itself: how far it has got, and the end of it to send.
+    #[cfg(test)]
+    pub(crate) fn hold_cloud_build(&mut self) -> (std::sync::mpsc::Sender<Result<(), String>>, Arc<Progress>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = Arc::new(Progress::default());
+        self.cloud_job = Some(CloudJob { done: rx, progress: Arc::clone(&progress), then: Then::Insert(json!({})) });
+        (tx, progress)
     }
 
     /// The linked scans the selection places, by name.
@@ -196,7 +213,7 @@ impl BimApp {
         let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
         match cloud::Format::from_extension(&ext) {
             Ok(format) => {
-                self.cloud_job = Some(CloudJob { done: build(path, format, link.scale()), then: Then::Reload(name) });
+                self.cloud_job = Some(build(path, format, link.scale(), Then::Reload(name)));
                 self.status = crate::Status { text: t("Building the scan's cache…").to_string(), error: false };
             }
             Err(_) => {
@@ -237,7 +254,7 @@ impl BimApp {
         if let (true, [path]) = (b.link, b.paths.as_slice()) {
             let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
             if let (Ok(format), Some(scale)) = (cloud::Format::from_extension(&ext), cloud::unit(b.units)) {
-                self.cloud_job = Some(CloudJob { done: build(path.clone(), format, scale), then: Then::Insert(p) });
+                self.cloud_job = Some(build(path.clone(), format, scale, Then::Insert(p)));
                 if let Some(b) = self.cloud_box.as_mut() {
                     b.error = None;
                 }

@@ -748,14 +748,19 @@ fn scans_within<'de, D: serde::Deserializer<'de>>(
 /// The scan of the file at `path`, of `format` in units of `scale` mm, linked: its cache is built (every point of it, a
 /// piece at a time) unless the user's cache holds it already, built from the file as it is now.
 pub fn link(path: &std::path::Path, format: Format, scale: f64) -> Result<Cloud, String> {
-    let (path, store) = cached(path, format, scale)?;
+    let (path, store) = cached(path, format, scale, &cache::Progress::default())?;
     Cloud::linked(&path.to_string_lossy(), scale, store)
 }
 
 /// The cache of the file at `path`, of `format` in units of `scale` mm, built unless the user's cache holds it already, and
 /// the file's whole path: what [`link`] links. A front end may build it on a thread of its own first, since a large file
-/// takes a while, and link it after, when it's found at once.
-pub fn cached(path: &std::path::Path, format: Format, scale: f64) -> Result<(std::path::PathBuf, cache::Store), String> {
+/// takes a while, showing how far it has got (`progress`), and link it after, when it's found at once.
+pub fn cached(
+    path: &std::path::Path,
+    format: Format,
+    scale: f64,
+    progress: &cache::Progress,
+) -> Result<(std::path::PathBuf, cache::Store), String> {
     let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file = FileSource::open(&path)?;
     let fingerprint = cache::fingerprint(&file, file.stamp(), format, scale)?;
@@ -763,7 +768,7 @@ pub fn cached(path: &std::path::Path, format: Format, scale: f64) -> Result<(std
     let store = match cache::Store::open(&out, fingerprint) {
         Ok(store) => store,
         Err(_) => {
-            cache::build(&file, format, scale, fingerprint, &out)?;
+            cache::build(&file, format, scale, fingerprint, &out, progress)?;
             cache::Store::open(&out, fingerprint)?
         }
     };

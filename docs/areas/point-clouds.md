@@ -165,5 +165,6 @@ nothing. A hundred million points build in about 70 seconds into 860 MB (`a_hund
 ignored, from a file made as it's read), and a picture's two million of them load in under twenty milliseconds.
 
 The desktop's Insert > Point Cloud box has Link the file (ticked for a large file), and builds the cache on a thread of its own
-(`cloud::cached`), the box waiting with a spinner, before `point_cloud` runs and finds it; Properties shows a linked scan's file,
+(`cloud::cached`), the box showing how far it has got on a gauge (`cache::Progress`: measuring the file, sorting its points,
+building them) before `point_cloud` runs and finds it; Properties shows a linked scan's file,
 and the right-click menu of a point cloud placing one has Reload Point Cloud, which builds on a thread too.

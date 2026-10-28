@@ -19,6 +19,7 @@ use super::{Format, GREY, MAX_FILE_COORD, MAX_SPAN, Stats};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// What a cache file's layout is: a cache of another is built again.
@@ -135,19 +136,71 @@ pub struct Block {
     pub colours: Option<Vec<[u8; 3]>>,
 }
 
-/// Builds the cache of the file `src` holds, of `format` in units of `scale` mm, at `out`, and says what it holds. It's
-/// written beside `out` and put there whole, so a cache is never found half written.
-pub fn build(src: &dyn Source, format: Format, scale: f64, fingerprint: u64, out: &Path) -> Result<Header, String> {
-    build_in(src, format, scale, fingerprint, out, CHUNK_POINTS)
+/// How far a build has got, for a front end to show while it waits: the thread building sets it, any other reads it.
+#[derive(Debug, Default)]
+pub struct Progress(AtomicU32);
+
+impl Progress {
+    /// The parts of the whole it counts in.
+    const WHOLE: f64 = 1000.0;
+
+    /// From 0, nothing done, to 1, built.
+    pub fn fraction(&self) -> f32 {
+        (f64::from(self.0.load(Ordering::Relaxed)) / Self::WHOLE) as f32
+    }
+
+    /// Says it's got as far as `f` of the whole, unless it had got further.
+    pub fn reach(&self, f: f64) {
+        self.0.fetch_max((f.clamp(0.0, 1.0) * Self::WHOLE).round() as u32, Ordering::Relaxed);
+    }
+}
+
+/// How far a build has got when it has measured the file, and when it has sorted its points: the rest is building them.
+const MEASURED: f64 = 0.3;
+const SORTED: f64 = 0.6;
+
+/// The file `src` holds, read through, the build's progress going from `span.0` at its first byte to `span.1` at its last.
+struct Watched<'a> {
+    src: &'a dyn Source,
+    progress: &'a Progress,
+    span: (f64, f64),
+}
+
+impl Source for Watched<'_> {
+    fn size(&self) -> u64 {
+        self.src.size()
+    }
+
+    fn read_at(&self, at: u64, buf: &mut [u8]) -> Result<usize, String> {
+        let n = self.src.read_at(at, buf)?;
+        let read = (at + n as u64) as f64 / self.src.size().max(1) as f64;
+        self.progress.reach(self.span.0 + (self.span.1 - self.span.0) * read.min(1.0));
+        Ok(n)
+    }
+}
+
+/// Builds the cache of the file `src` holds, of `format` in units of `scale` mm, at `out`, and says what it holds, saying
+/// how far it has got in `progress` as it goes. It's written beside `out` and put there whole, so a cache is never found half
+/// written.
+pub fn build(src: &dyn Source, format: Format, scale: f64, fingerprint: u64, out: &Path, progress: &Progress) -> Result<Header, String> {
+    build_in(src, format, scale, fingerprint, out, CHUNK_POINTS, progress)
 }
 
 /// As [`build`], with no more than `chunk` points built in memory at once.
-fn build_in(src: &dyn Source, format: Format, scale: f64, fingerprint: u64, out: &Path, chunk: usize) -> Result<Header, String> {
+fn build_in(
+    src: &dyn Source,
+    format: Format,
+    scale: f64,
+    fingerprint: u64,
+    out: &Path,
+    chunk: usize,
+    progress: &Progress,
+) -> Result<Header, String> {
     if !(scale.is_finite() && scale > 0.0) {
         return Err(format!("a unit of {scale} mm isn't one"));
     }
     let mut stats = Stats::default();
-    super::each(src, format, &mut |raw| stats.add(&raw, scale))?;
+    super::each(&Watched { src, progress, span: (0.0, MEASURED) }, format, &mut |raw| stats.add(&raw, scale))?;
     if stats.count == 0 {
         return Err("it holds no points".into());
     }
@@ -172,7 +225,7 @@ fn build_in(src: &dyn Source, format: Format, scale: f64, fingerprint: u64, out:
     let mut sorted: HashMap<usize, (Vec<u8>, u64)> = HashMap::new();
     let cube_file = |c: usize| work.path().join(format!("c{c}"));
     let mut n = 0_u64;
-    super::each(src, format, &mut |raw| {
+    super::each(&Watched { src, progress, span: (MEASURED, SORTED) }, format, &mut |raw| {
         let p = local(raw.p.map(|v| v * scale));
         let colour = shade.as_ref().map_or([GREY; 3], |s| s.of(&raw));
         let c = octree::square(p, lo, edge, side);
@@ -204,6 +257,9 @@ fn build_in(src: &dyn Source, format: Format, scale: f64, fingerprint: u64, out:
         chunk,
         work: work.path().to_path_buf(),
         made: 0,
+        progress,
+        built: 0,
+        total: n,
     };
     b.out.write_all(&[0; HEADER]).map_err(|e| e.to_string())?;
     let counts: HashMap<usize, u64> = cubes.into_iter().collect();
@@ -235,6 +291,7 @@ fn build_in(src: &dyn Source, format: Format, scale: f64, fingerprint: u64, out:
     let f = file.as_file_mut();
     f.seek(SeekFrom::Start(0)).and_then(|_| f.write_all(&head)).and_then(|()| f.sync_all()).map_err(|e| e.to_string())?;
     file.persist(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    progress.reach(1.0);
     Ok(header)
 }
 
@@ -417,6 +474,10 @@ struct Builder<'a> {
     work: PathBuf,
     /// Files made by splitting, for their names.
     made: usize,
+    progress: &'a Progress,
+    /// The points built so far, of the `total` the file holds.
+    built: u64,
+    total: u64,
 }
 
 impl Builder<'_> {
@@ -602,6 +663,9 @@ impl Builder<'_> {
         })?;
         drop(src);
         let _ = std::fs::remove_file(path);
+        self.built += points.len() as u64;
+        // Short of the whole: the nodes above and the table are still to write.
+        self.progress.reach(SORTED + (0.99 - SORTED) * self.built as f64 / self.total.max(1) as f64);
         if points.is_empty() {
             return Ok(None);
         }

@@ -43,12 +43,47 @@ fn every(store: &Store) -> Vec<([i64; 3], [u8; 3])> {
     all
 }
 
+/// A scan's bytes, noting how far the build said it had got each time it asked for some.
+struct Noted<'a> {
+    bytes: &'a [u8],
+    progress: &'a Progress,
+    seen: Mutex<Vec<f32>>,
+}
+
+impl Source for Noted<'_> {
+    fn size(&self) -> u64 {
+        self.bytes.size()
+    }
+
+    fn read_at(&self, at: u64, buf: &mut [u8]) -> Result<usize, String> {
+        self.seen.lock().unwrap().push(self.progress.fraction());
+        self.bytes.read_at(at, buf)
+    }
+}
+
+#[test]
+fn a_build_says_how_far_it_has_got_from_nothing_to_whole_and_never_goes_back() {
+    let bytes = xyz(&scatter(60_000));
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.bcoct");
+    let progress = Progress::default();
+    assert_eq!(progress.fraction(), 0.0);
+    let src = Noted { bytes: &bytes, progress: &progress, seen: Mutex::default() };
+    build_in(&src, Format::Xyz, 1.0, 3, &out, 20_000, &progress).unwrap();
+    let seen = src.seen.into_inner().unwrap();
+    assert_eq!(seen.first(), Some(&0.0));
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+    // The file is read twice, the first time to measure it, before any point is built.
+    assert!(seen.iter().any(|&f| f > 0.0) && seen.iter().all(|&f| f <= 0.6), "{seen:?}");
+    assert_eq!(progress.fraction(), 1.0);
+}
+
 #[test]
 fn a_small_scans_cache_is_the_tree_a_project_builds_in_memory() {
     let bytes = xyz(&scatter(60_000));
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.bcoct");
-    let h = build(&bytes.as_slice(), Format::Xyz, 1.0, 7, &out).unwrap();
+    let h = build(&bytes.as_slice(), Format::Xyz, 1.0, 7, &out, &Progress::default()).unwrap();
     let held = read_from(&bytes.as_slice(), Format::Xyz, &Options { scale: 1.0, spacing: 0.0, cap: usize::MAX }).unwrap();
     assert_eq!((h.read, h.origin, h.colours), (60_000, held.origin, true));
     let store = Store::open(&out, 7).unwrap();
@@ -87,7 +122,7 @@ fn a_scan_built_a_piece_at_a_time_keeps_every_point_once_each_in_its_own_node() 
     // Chunks smaller than a node's inflow, and larger: cubes split again and again, and built in memory with levels of their own.
     for chunk in [9_000, 60_000] {
         let out = dir.path().join(format!("{chunk}.bcoct"));
-        build_in(&bytes.as_slice(), Format::Xyz, 1.0, 1, &out, chunk).unwrap();
+        build_in(&bytes.as_slice(), Format::Xyz, 1.0, 1, &out, chunk, &Progress::default()).unwrap();
         let store = Store::open(&out, 1).unwrap();
         let nodes = store.tree().nodes();
         assert!(nodes.len() > 8, "{chunk}: {} nodes", nodes.len());
@@ -124,7 +159,7 @@ fn a_damaged_or_foreign_cache_is_refused_and_a_damaged_block_is_drawn_as_nothing
     let bytes = xyz(&scatter(40_000));
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.bcoct");
-    build(&bytes.as_slice(), Format::Xyz, 1.0, 5, &out).unwrap();
+    build(&bytes.as_slice(), Format::Xyz, 1.0, 5, &out, &Progress::default()).unwrap();
     let good = std::fs::read(&out).unwrap();
     let store = Store::open(&out, 5).unwrap();
     let nodes = store.tree().nodes().len();
@@ -257,7 +292,7 @@ fn a_hundred_million_points_are_built_a_piece_at_a_time() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("big.bcoct");
     let started = std::time::Instant::now();
-    build(&src, Format::Las, 1.0, 9, &out).unwrap();
+    build(&src, Format::Las, 1.0, 9, &out, &Progress::default()).unwrap();
     let built = started.elapsed();
     let store = Store::open(&out, 9).unwrap();
     assert_eq!((store.points(), store.header().read), (n, n));

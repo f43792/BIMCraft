@@ -22,6 +22,26 @@ fn scans(h: &Harness<BimApp>) -> Vec<Id> {
 }
 
 #[test]
+fn a_scans_cache_being_built_shows_how_far_it_has_got_on_a_gauge_in_its_box() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(BOX);
+    h.state_mut().point_cloud_paths(vec![face("gauge", "gauge.xyz", 0.0)]);
+    h.run();
+    // The build, held where the test can move it on.
+    let (done, progress) = h.state_mut().hold_cloud_build();
+    progress.reach(0.5);
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Building the scan's cache…").is_some());
+    assert_eq!(h.get_by_role(Role::ProgressIndicator).accesskit_node().numeric_value(), Some(50.0));
+    done.send(Err("it holds no points".into())).unwrap();
+    h.step();
+    h.step();
+    assert!(h.query_by_role(Role::ProgressIndicator).is_none(), "the gauge goes when it's done");
+    assert!(h.query_by_label("it holds no points").is_some(), "and the box says why it failed");
+}
+
+#[test]
 fn insert_point_cloud_brings_the_files_picked_in_as_one_scan_and_selects_it() {
     let mut h = app(BOX);
     press(&mut h, "Insert");
