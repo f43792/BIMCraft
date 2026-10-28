@@ -1380,7 +1380,8 @@ pub fn draw_at(m: &Model, level: impl Key, view: View, k: f32) -> Drawing {
 
 /// The points of the scans a plan sees, from its cut plane down to its view depth, as Revit draws a point cloud in plan: from
 /// above, each a dot [`view3d::DOT`] pixels wide in its colour (or the view's), the highest at each pixel on top, no more than
-/// [`view3d::DRAWN`] of them among the scans. Each scan is one picture, no bigger than its dots and clear where it has none, so
+/// [`view3d::DRAWN`] of them among the scans: the levels of detail of each the plan sees largest
+/// ([`crate::cloud::octree::select`]), and none it doesn't see. Each scan is one picture, no bigger than its dots and clear where it has none, so
 /// it picks where its points are.
 fn scans(d: &mut Drawing, m: &Model, range: &PlanRange, look: &Look) {
     let placed: Vec<(Id, &crate::model::PointCloud, &crate::cloud::Cloud)> = m
@@ -1391,16 +1392,34 @@ fn scans(d: &mut Drawing, m: &Model, range: &PlanRange, look: &Look) {
             _ => None,
         })
         .collect();
-    let step = view3d::every(placed.iter().map(|(_, _, c)| c.len()).sum());
     let (w, h) = (i64::from(d.view.width), i64::from(d.view.height));
     let (dot, half) = (view3d::DOT as i64, view3d::DOT as f64 / 2.0);
+    // The nodes of each scan the plan draws: those its range and its edges see, the largest first, as many as its budget holds.
+    let view = d.view;
+    let trees: Vec<&crate::cloud::octree::Octree> = placed.iter().map(|(_, _, c)| c.tree()).collect();
+    let chosen = crate::cloud::octree::select(&trees, view3d::DRAWN, |t, node| {
+        let place = m.cloud_place(placed.get(t)?.1);
+        let corners = node.corners().map(|c| place(c.map(|v| v as f32)));
+        let (lo, hi) = corners.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), c| (lo.min(c[2]), hi.max(c[2])));
+        // A node's corners are only as near as `f32` holds them: a little room either way.
+        let pad = 1.0 + node.edge * 1e-6;
+        if hi + pad < range.depth - TOL || lo - pad > range.cut {
+            return None;
+        }
+        let px = corners.map(|c| view.px(P2(c[0], c[1])));
+        let (x0, x1) = px.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
+        let (y0, y1) = px.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+        let edge = dot as f32;
+        (x1 >= -edge && y1 >= -edge && x0 <= w as f32 + edge && y0 <= h as f32 + edge).then_some(view.scale)
+    });
     let grey = Rgb(crate::cloud::GREY, crate::cloud::GREY, crate::cloud::GREY);
-    for (id, pc, cloud) in placed {
+    for ((id, pc, cloud), nodes) in placed.iter().copied().zip(chosen) {
         let place = m.cloud_place(pc);
-        let colours = cloud.colours();
+        let (tree, points, colours) = (cloud.tree(), cloud.points(), cloud.colours());
         // Each point it sees: its dot's corner, px, its height and its colour.
         let mut seen: Vec<(i64, i64, f64, Rgb)> = Vec::new();
-        for (i, p) in cloud.points().iter().enumerate().step_by(step) {
+        for i in nodes.into_iter().flat_map(|node| tree.points_of(node)).map(|&i| i as usize) {
+            let Some(p) = points.get(i) else { continue };
             let [x, y, z] = place(*p);
             if !(range.depth - TOL..=range.cut).contains(&z) {
                 continue;

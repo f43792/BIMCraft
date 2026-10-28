@@ -14,9 +14,11 @@ use flate2::write::ZlibEncoder;
 use serde::{Deserialize, Serialize};
 
 mod e57;
+pub mod octree;
 
-/// Points a cloud may keep: a file with more is thinned down to it.
-pub const MAX_CLOUD_POINTS: usize = 5_000_000;
+/// Points a project's scans may keep among them: a file with more is thinned down to what the others leave. A picture draws no
+/// more than its budget of them however many there are ([`octree`]).
+pub const MAX_CLOUD_POINTS: usize = 30_000_000;
 /// What a file may be before it's refused, bytes.
 pub const MAX_BYTES: usize = 2 << 30;
 /// How far a file's coordinates may lie from its own origin, mm: a survey's, a long way off, but never past it.
@@ -186,6 +188,8 @@ pub struct Cloud {
     packed: Arc<OnceLock<CloudFile>>,
     /// Where its points are from above, made the first time something snaps to it.
     grid: Arc<OnceLock<Grid>>,
+    /// Its points by level of detail, made the first time it's drawn.
+    tree: Arc<OnceLock<octree::Octree>>,
 }
 
 /// A cloud's points by the square [`CELL`] mm wide they lie in, seen from above.
@@ -292,6 +296,7 @@ impl Cloud {
             hi,
             packed: Arc::default(),
             grid: Arc::default(),
+            tree: Arc::default(),
         })
     }
 
@@ -332,13 +337,9 @@ impl Cloud {
         self.colours.as_deref().map(Vec::as_slice)
     }
 
-    /// Its points, shared: what a view keeps of it without copying them.
-    pub(crate) fn shared_points(&self) -> Arc<Vec<[f32; 3]>> {
-        Arc::clone(&self.points)
-    }
-
-    pub(crate) fn shared_colours(&self) -> Option<Arc<Vec<[u8; 3]>>> {
-        self.colours.clone()
+    /// Its points by level of detail: what a picture chooses what to draw from.
+    pub fn tree(&self) -> &octree::Octree {
+        self.tree.get_or_init(|| octree::Octree::build(&self.points))
     }
 
     /// Of its points whose height from its middle lies within `z`, the nearest to `at` (from its middle, mm) seen from above and

@@ -562,3 +562,43 @@ fn a_project_file_with_too_many_scans_is_refused_before_the_extra_one_is_unpacke
         assert!(e.contains("scans") && e.contains(&MAX_CLOUDS.to_string()), "{e}");
     }
 }
+
+// ---------- scans larger than a picture draws ----------
+
+/// A red patch 2 m square of points 10 mm apart, half a metre up at the origin, and far east of it a blue field of 2.4 million
+/// more, metres: more than a picture draws ([`crate::view3d::DRAWN`]) among them.
+fn patch_and_field() -> String {
+    let mut text = String::with_capacity(64 << 20);
+    for i in 0..200 {
+        for k in 0..200 {
+            text += &format!("{} {} 0.5 255 0 0\n", f64::from(i) * 0.01, f64::from(k) * 0.01);
+        }
+    }
+    for i in 0..1600 {
+        for k in 0..1500 {
+            text += &format!("{} {} 0.5 0 0 255\n", 100.0 + f64::from(i) * 0.3, f64::from(k) * 0.3);
+        }
+    }
+    text
+}
+
+#[test]
+fn a_scan_larger_than_a_picture_draws_shows_every_point_where_a_view_looks_closely() {
+    let mut s = Session::new();
+    let r = run(&mut s, "point_cloud", json!({"path": scan("lod", "field.xyz", &patch_and_field()), "origin": "file"}));
+    assert_eq!(r["points"].as_u64(), Some(2_440_000), "{r}");
+    // Each point a dot 2 px wide, 4 px from the next: drawn, all 40,000 of the patch's show.
+    let all = 40_000 * crate::view3d::DOT * crate::view3d::DOT;
+    let scene = Scene::new(&s.model);
+    let cam =
+        crate::view3d::Camera { azimuth: -90.0, elevation: 89.0, scale: 0.4, target: [1000.0, 1000.0, 500.0], width: 900, height: 900 };
+    let reds = pixels(&scene.render(&cam, &[]), red);
+    assert!(reds >= all * 98 / 100, "{reds} of {all}");
+    let level = run(&mut s, "elements", json!({"category": "level"}))["elements"][0]["id"].as_u64().unwrap();
+    let plan = render::draw_at(&s.model, level, render::View { scale: 0.4, cx: 1000.0, cy: 1000.0, width: 900, height: 900 }, 1.0);
+    let reds = drawn(&plan, red);
+    assert!(reds >= all * 98 / 100, "{reds} of {all}");
+    // Seen whole, the picture still draws no more than it may, the coarse levels of all of it.
+    let fit = scene.render(&scene.fit(AZIMUTH, ELEVATION, 640, 480), &[]);
+    assert!(pixels(&fit, blue) > 10_000 && pixels(&fit, red) > 0);
+}

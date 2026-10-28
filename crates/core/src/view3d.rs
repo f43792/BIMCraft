@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+use crate::cloud::octree::{Node, Octree, select};
 use crate::geom::{self, P2};
 use crate::graphics::{Look, VisualStyle};
 use crate::model::{Element, Id, Layer, Model};
@@ -797,11 +798,10 @@ pub struct Scene {
     scans: Vec<Scan>,
 }
 
-/// A scan as a point cloud places it: its points and colours (shared with the model's), and where they go.
+/// A scan as a point cloud places it: the model's cloud (its points shared), and where they go.
 struct Scan {
     owner: Id,
-    points: Arc<Vec<[f32; 3]>>,
-    colours: Option<Arc<Vec<[u8; 3]>>>,
+    cloud: crate::cloud::Cloud,
     /// Its middle in the model, and the cosine and sine of its turn.
     at: P3,
     turn: (f64, f64),
@@ -811,21 +811,53 @@ struct Scan {
 
 impl Scan {
     fn place(&self, p: [f32; 3]) -> P3 {
-        let (x, y, (cos, sin)) = (f64::from(p[0]), f64::from(p[1]), self.turn);
-        [self.at[0] + x * cos - y * sin, self.at[1] + x * sin + y * cos, self.at[2] + f64::from(p[2])]
+        self.place_mm(p.map(f64::from))
+    }
+
+    fn place_mm(&self, [x, y, z]: P3) -> P3 {
+        let (cos, sin) = self.turn;
+        [self.at[0] + x * cos - y * sin, self.at[1] + x * sin + y * cos, self.at[2] + z]
+    }
+
+    /// How many pixels a millimetre of `node` is drawn, or none where none of it is seen: past the picture's edges, outside the
+    /// section box or a section's clip.
+    fn seen(&self, node: &Node, cam: &Camera, clip: Option<&Clip>, cut: Option<&Boxed>, (w, h): (usize, usize)) -> Option<f64> {
+        let corners = node.corners().map(|c| self.place_mm(c));
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for c in &corners {
+            for k in 0..3 {
+                (lo[k], hi[k]) = (lo[k].min(c[k]), hi[k].max(c[k]));
+            }
+        }
+        if cut.is_some_and(|b| (0..3).any(|k| hi[k] < b.lo[k] || lo[k] > b.hi[k])) {
+            return None;
+        }
+        let span = |a: (f64, f64), v: f64| (a.0.min(v), a.1.max(v));
+        let none = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut x, mut y, mut z) = (none, none, none);
+        for c in corners {
+            let (px, py, pz) = cam.project(c);
+            (x, y, z) = (span(x, px), span(y, py), span(z, pz));
+        }
+        let edge = DOT as f64;
+        if x.1 < -edge || y.1 < -edge || x.0 > w as f64 + edge || y.0 > h as f64 + edge {
+            return None;
+        }
+        if clip.is_some_and(|k| {
+            z.0 > k.near || k.far.is_some_and(|f| z.1 < k.near - f) || x.1 < k.x.0 || x.0 > k.x.1 || y.1 < k.y.0 || y.0 > k.y.1
+        }) {
+            return None;
+        }
+        Some(cam.scale)
     }
 }
 
-/// The most points a picture draws, as Revit's density does: past it, every so many of each scan's.
+/// The most points a picture draws, as Revit's density does: past it, the levels of detail of each scan seen largest
+/// ([`crate::cloud::octree::select`]).
 pub const DRAWN: usize = 2_000_000;
 
 /// How wide a point is drawn, px.
 pub(crate) const DOT: usize = 2;
-
-/// Which of `total` points a picture draws: every one of so many.
-pub(crate) fn every(total: usize) -> usize {
-    total.div_ceil(DRAWN).max(1)
-}
 
 /// How an element's triangles name their faces.
 enum Rule {
@@ -930,12 +962,11 @@ impl Scene {
             .filter_map(|(id, e)| {
                 let Element::PointCloud(pc) = e else { return None };
                 let cloud = m.clouds.get(&pc.cloud)?;
-                let (points, colours) = (cloud.shared_points(), cloud.shared_colours());
                 let (lo, hi) = m.cloud_box(*id)?;
                 let corners = std::array::from_fn(|k| std::array::from_fn(|axis| if k >> axis & 1 == 0 { lo[axis] } else { hi[axis] }));
                 let (sin, cos) = pc.angle.to_radians().sin_cos();
                 let at = [pc.at.0, pc.at.1, m.elevation(pc.level) + pc.offset];
-                Some(Scan { owner: *id, points, colours, at, turn: (cos, sin), corners })
+                Some(Scan { owner: *id, cloud: cloud.clone(), at, turn: (cos, sin), corners })
             })
             .collect();
         Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases, masses, levels, scans, edges: OnceLock::new() }
@@ -1267,12 +1298,16 @@ impl Scene {
             return Vec::new();
         }
         let mut dots = vec![PAPER; w * h];
-        let step = every(kept.iter().map(|(_, s)| s.points.len()).sum());
+        // The nodes of each scan the picture draws: the largest first, as many as its budget holds.
+        let trees: Vec<&Octree> = kept.iter().map(|(_, s)| s.cloud.tree()).collect();
+        let chosen = select(&trees, DRAWN, |t, node| kept.get(t)?.1.seen(node, cam, clip, cut, (w, h)));
         let grey = Rgb(crate::cloud::GREY, crate::cloud::GREY, crate::cloud::GREY);
         let half = DOT as f64 / 2.0;
-        for (n, scan) in kept {
+        for (&(n, scan), nodes) in kept.iter().zip(chosen) {
             let slot = (self.tris.len() + n) as u32;
-            for (i, p) in scan.points.iter().enumerate().step_by(step) {
+            let (tree, points, colours) = (scan.cloud.tree(), scan.cloud.points(), scan.cloud.colours());
+            for i in nodes.into_iter().flat_map(|node| tree.points_of(node)).map(|&i| i as usize) {
+                let Some(p) = points.get(i) else { continue };
                 let at = scan.place(*p);
                 if cut.is_some_and(|k| !k.holds(at)) {
                     continue;
@@ -1287,7 +1322,7 @@ impl Scene {
                 if !(x0 > -(DOT as f64) && y0 > -(DOT as f64) && x0 < w as f64 && y0 < h as f64 && z.is_finite()) {
                     continue;
                 }
-                let base = scan.colours.as_ref().and_then(|c| c.get(i)).map_or(grey, |c| Rgb(c[0], c[1], c[2]));
+                let base = colours.and_then(|c| c.get(i)).map_or(grey, |c| Rgb(c[0], c[1], c[2]));
                 let colour = if plain { base } else { look.surface(scan.owner, base) };
                 let z = z as f32;
                 let (x0, y0) = (x0 as i64, y0 as i64);
@@ -1919,13 +1954,6 @@ impl Image {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_picture_draws_every_point_up_to_its_budget_and_an_even_share_past_it() {
-        assert_eq!((every(0), every(1), every(DRAWN)), (1, 1, 1));
-        assert_eq!((every(DRAWN + 1), every(2 * DRAWN), every(5 * DRAWN - 1)), (2, 2, 5));
-        assert!((1..=6).all(|k| (k * DRAWN + 7).div_ceil(every(k * DRAWN + 7)) <= DRAWN));
-    }
 
     #[test]
     fn parallel_geometry_keeps_exact_triangle_order_and_ownership() {

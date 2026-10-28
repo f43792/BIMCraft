@@ -54,8 +54,8 @@ go. After the opaque surfaces are rasterised, `Scene::dots` draws each point as 
 depth buffer, so what is nearer hides a scan and a scan hides what is behind it, and what the view sees through is drawn over
 it. A point's pixel holds its scan's slot after the triangles', so it picks, box-selects and tints as its element; it has no
 face to paint and draws no edge. Points are not lit: they keep the scan's colours, grey (`cloud::GREY`) for a scan with none,
-or the colour the view's projection fill gives. A picture draws at most `DRAWN` points, an even share of each scan's past
-that, as Revit's density does. The view fits round its scans, and a level's plane reaches past them (`Model::model_extent`).
+or the colour the view's projection fill gives. A picture draws at most `DRAWN` points, as Revit's density does, chosen by
+level of detail (below). The view fits round its scans, and a level's plane reaches past them (`Model::model_extent`).
 A 3D view's section box keeps a scan's points inside it and no others, so its floors and ceilings can be cut away to show the walls to
 model against ([views and graphics](views-and-graphics.md)); in a plan the view range does it, or the box itself when the plan follows it. Views hide and override point clouds by element or by the category `pointcloud` (`graphics::SCANS`, apart from `MODEL`:
 Revit has a tab of its own for them in Visibility/Graphics, and Object Styles no row). The graphics card doesn't draw them
@@ -64,7 +64,8 @@ yet: `gpu::Mesh::new` refuses a view that shows one, and the processor draws it.
 A section's or an elevation's picture is the same rasteriser with a `Clip`, and `Scene::dots` keeps a point as `raster` keeps a
 pixel: between the line and the far clip, inside the crop. A plan draws what its view range sees, from the cut plane down to
 the view depth (`render::scans`, under everything else), from above: each point a dot `DOT` pixels wide in its colour or the
-view's, the highest at each pixel on top, `DRAWN` among the scans as in 3D. Each scan is one `Prim::Image` owned by its
+view's, the highest at each pixel on top, `DRAWN` among the scans as in 3D, of the nodes whose cubes cross its range and its
+edges. Each scan is one `Prim::Image` owned by its
 element, no bigger than its dots and clear between them; a picture picks where it isn't clear (`drawn_near` in `Drawing::pick_all`),
 so a click between a scan's points finds what is there, and a sheet's opaque pictures pick as they did. A PDF masks a picture
 that isn't all there with its alpha (`/SMask`), and an SVG holds it as a PNG. A reflected ceiling plan leaves scans out. The
@@ -97,3 +98,22 @@ the units of its coordinates, a spacing, and Revit's positioning, Auto - Center 
 `point_cloud` on the level of the plan on screen and selects what it placed; a refusal stays in the box with its reason
 (`point_cloud_paths` opens the box, what a test hands the files to). The Properties palette shows a point cloud's level and offset
 (edited), its scan, file and points, its origin and angle; Visibility/Graphics lists `pointcloud` after the model's categories.
+
+## Levels of detail
+
+A scan is drawn through an octree of its points (`cloud/octree.rs`), as Potree made standard, built the first time a picture
+draws it and shared by its clones (`Cloud::tree`), so a project file doesn't hold it. Its root's cube is the scan's box made
+square; a node keeps one point in each square of a 64-square grid over its cube (first come first kept, the grid made coarser
+should more than `NODE_MAX` squares be filled) and passes the rest to the eighth of its cube each lies in, whose grid is twice
+as fine; a node given no more than `NODE_POINTS` keeps them all, as does one at `MAX_LEVEL`, so points all in one place end the
+tree. The root is a coarse picture of the whole scan, not of where the file began, and each level down adds detail. The tree
+holds the cloud's point indices grouped by node; the points stay as the cloud keeps them. The eighths are built on the threads
+there are: twenty million points take under two seconds.
+
+`octree::select` is what every picture draws: given how many pixels a millimetre of a node is drawn (none where it isn't seen),
+it takes each scan's root, then the nodes drawn largest first while their points fit the budget, `DRAWN` among the scans, and
+looks into a node only while its squares are drawn a pixel or wider (`FINEST`), since finer detail adds nothing. The 3D view and
+sections leave out nodes past the picture's edges, outside the section box or a section's clip (`Scan::seen`); a plan, those
+outside its view range or its edges. So a view zoomed in on part of a scan of many millions draws every point it sees, and one
+of all of it draws its coarse levels. A project's scans hold up to `MAX_CLOUD_POINTS` (30 million) among them; past it, the file
+is thinned as above. Snapping still looks through the `Grid`.
