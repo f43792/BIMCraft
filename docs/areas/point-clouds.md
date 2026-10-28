@@ -102,7 +102,10 @@ the units of its coordinates, a spacing, and Revit's positioning, Auto - Center 
 (edited), its scan, file and points, its origin and angle; Visibility/Graphics lists `pointcloud` after the model's categories.
 A click on a scan's points in a plan selects it, and Move, Copy and Rotate take it as they take anything, their points snapping
 to its points (`Kind::Point`), so a scan is moved from a spot it measured; while it moves, the box of its picture is outlined
-where it would go (`canvas::ghost`). Sections and the 3D view don't move it yet, as they move nothing.
+where it would go (`canvas::ghost`). In a section or an elevation, Move takes it along the view's line and up
+(`section::move_in_section`, a line from the base point to the cursor): `move`'s `up` changes its offset, as it does what else
+sits at one height (`commands::lifted`: components, floors, ceilings, roofs), and refuses the rest, a wall with it. The 3D view
+doesn't move it yet.
 
 ## Levels of detail
 

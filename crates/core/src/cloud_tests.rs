@@ -177,6 +177,34 @@ fn a_scan_is_brought_in_once_and_placed_as_often_as_wanted() {
 }
 
 #[test]
+fn move_up_lifts_a_scan_and_what_sits_at_one_height_but_not_a_wall() {
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("lift", "box.xyz", BOX)}))["id"].as_u64().unwrap();
+    // Its foot on the level to start with.
+    let foot = one(&mut s)["offset"].as_f64().unwrap();
+    let offset = |s: &mut Session| one(s)["offset"].as_f64().unwrap() - foot;
+    run(&mut s, "move", json!({"ids": [id], "up": 750}));
+    assert_eq!(offset(&mut s), 750.0);
+    run(&mut s, "move", json!({"ids": [id], "by": [100, 0], "up": -250}));
+    assert_eq!((one(&mut s)["at"].clone(), offset(&mut s)), (json!([100.0, 0.0]), 500.0));
+    // A component sits at one height too.
+    let c = run(&mut s, "component", json!({"family": "WC", "at": [3000, 0]}))["id"].as_u64().unwrap();
+    run(&mut s, "move", json!({"ids": [id, c], "up": 100}));
+    assert_eq!(run(&mut s, "elements", json!({"category": "component"}))["elements"][0]["offset"], json!(100.0), "{c}");
+    assert_eq!(offset(&mut s), 600.0);
+    // A wall's height is its constraints, base and top: `up` refuses it, and so the whole move, saying what to change.
+    run(&mut s, "wall", json!({"points": [[0, 2000], [4000, 2000]]}));
+    let wall = run(&mut s, "elements", json!({"category": "wall"}))["elements"][0]["id"].as_u64().unwrap();
+    let e = fails(&mut s, "move", json!({"ids": [id, wall], "up": 100}));
+    assert!(e.contains("up") && e.contains(&wall.to_string()) && e.contains("offset"), "{e}");
+    assert_eq!(offset(&mut s), 600.0, "nothing moved");
+    let e = fails(&mut s, "move", json!({"ids": [id]}));
+    assert!(e.contains("by") && e.contains("up"), "{e}");
+    let e = fails(&mut s, "move", json!({"ids": [id], "up": 2e9}));
+    assert!(e.contains("up"), "{e}");
+}
+
+#[test]
 fn a_scan_moves_turns_and_copies_with_its_element_but_doesnt_mirror() {
     let mut s = Session::new();
     let id = run(&mut s, "point_cloud", json!({"path": scan("edit", "box.xyz", BOX)}))["id"].as_u64().unwrap();

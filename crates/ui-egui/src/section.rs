@@ -1,8 +1,8 @@
 //! Sections and elevations: the core's picture of what the view sees past its line, its cut,
 //! levels, grids, notes and spot elevations drawn over it, panned and zoomed like a plan (its
 //! points run along its line and up). A click picks what it shows: a cut, a level, a grid, or what
-//! lies beyond; a drag, a selection box; with Text or Spot Elevation, a click places one. Its crop
-//! region's grips drag its edges.
+//! lies beyond; a drag, a selection box; with Text or Spot Elevation, a click places one; Move takes
+//! the selection along its line and up. Its crop region's grips drag its edges.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use bimcraft_core::geom::P2;
 use bimcraft_core::model::{Id, Model};
 use bimcraft_core::render::{self, Rgb, View};
 use bimcraft_core::view3d::{Image, MAX_SIDE, Scene};
-use egui::{Color32, ColorImage, Context, Rect, Sense, TextureHandle, TextureOptions, Ui, pos2};
+use egui::{Color32, ColorImage, Context, Rect, Sense, Stroke, TextureHandle, TextureOptions, Ui, Vec2, pos2};
 use serde_json::json;
 
 use crate::canvas::{PICK, Place, click_modifiers, color, paint};
@@ -134,6 +134,10 @@ impl BimApp {
         self.cut.image = held;
         p.extend(boxed);
         p.extend(datum);
+        // Move's base point to the cursor.
+        if let (Tool::Move(Some(base)), Some(c)) = (&self.tool, local) {
+            p.line_segment([rect.min + Vec2::from(view.px(*base)), rect.min + Vec2::from(c)], Stroke::new(1.0, canvas_pal().accent));
+        }
         let clicked = self.clicked_at(&response).map(|at| (at.x - rect.min.x, at.y - rect.min.y));
         // Along the line and up, to the nearest 10 mm.
         let at = |q: (f32, f32)| {
@@ -158,6 +162,10 @@ impl BimApp {
                 }
             }
             (Some(q), Tool::Text) => self.write_note(id, at(q)),
+            (Some(q), &Tool::Move(base)) => match base {
+                None => self.tool = Tool::Move(Some(at(q))),
+                Some(from) => self.move_in_section(id, from, at(q)),
+            },
             (Some(q), Tool::Spot) => {
                 self.run("spot", json!({"at": [at(q).0, at(q).1], "view": id}));
             }
@@ -169,5 +177,24 @@ impl BimApp {
         }
         self.context_menu(&response);
         self.nav_bar(ui, rect, id);
+    }
+
+    /// Move's second point in section or elevation `id`, its first `from` (along its line and up): the selection taken along
+    /// the line in plan and up by the difference. A refusal (a wall moved up) keeps the base point and says why.
+    fn move_in_section(&mut self, id: Id, from: P2, to: P2) {
+        let Some(v) = self.session.model.section(id) else { return };
+        let (d, u) = (to - from, (v.end - v.start).unit());
+        if d.0 == 0.0 && d.1 == 0.0 {
+            return;
+        }
+        let by = u * d.0;
+        let mut params = json!({"ids": self.selection, "by": [by.0, by.1]});
+        if d.1 != 0.0 {
+            params["up"] = json!(d.1);
+        }
+        self.tool = match self.run("move", params) {
+            Some(_) => Tool::Modify,
+            None => Tool::Move(Some(from)),
+        };
     }
 }

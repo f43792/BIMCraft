@@ -84,6 +84,39 @@ fn move_and_rotate_take_a_scan_picked_in_the_plan_snapping_to_its_points() {
 }
 
 #[test]
+fn move_in_a_section_takes_a_scan_along_its_line_and_up() {
+    let path = face("section-move", "face.xyz", 0.0);
+    let script = format!("section {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}\npoint_cloud {}", json!({"path": path}));
+    let mut h = app(&script);
+    let id = scans(&h)[0];
+    let placed = |h: &Harness<BimApp>| match h.state().session.model.elements.get(id) {
+        Some(Element::PointCloud(pc)) => (pc.at, pc.offset),
+        _ => panic!("the scan is gone"),
+    };
+    let (at, offset) = placed(&h);
+    browse(&mut h, "Section 1");
+    h.state_mut().selection = vec![id];
+    shortcut(&mut h, "MV");
+    assert!(matches!(h.state().tool, Tool::Move(None)), "{:?}", h.state().tool);
+    // Points in a section are along its line and up.
+    click(&mut h, P2(2000.0, 500.0));
+    click(&mut h, P2(2600.0, 1300.0));
+    assert_eq!(placed(&h), (at + P2(600.0, 0.0), offset + 800.0), "{}", h.state().status.text);
+    assert_eq!((h.state().selection.clone(), h.state().tool.clone()), (vec![id], Tool::Modify));
+    // A wall has no one height: moved up, it says so and stays.
+    let undo = h.state().session.history().len();
+    let mut with_wall = h.state().selection.clone();
+    h.state_mut().session.execute("wall", &json!({"points": [[0, 0], [4000, 0]]})).unwrap();
+    with_wall.extend(ids(&h, "wall"));
+    h.state_mut().selection = with_wall;
+    shortcut(&mut h, "MV");
+    click(&mut h, P2(2000.0, 500.0));
+    click(&mut h, P2(2000.0, 900.0));
+    assert!(h.state().status.error && h.state().status.text.contains("offsets"), "{}", h.state().status.text);
+    assert_eq!(h.state().session.history().len(), undo + 1, "only the wall was made");
+}
+
+#[test]
 fn insert_point_cloud_brings_the_files_picked_in_as_one_scan_and_selects_it() {
     let mut h = app(BOX);
     press(&mut h, "Insert");

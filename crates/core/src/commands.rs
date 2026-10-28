@@ -822,8 +822,10 @@ pub static ALL: &[Command] = &[
         "move",
         ui_msg!("Move"),
         &["MV"],
-        "{ids: [id,…], by: [dx, dy], end?: start|end} moves elements in plan; walls joined to a moved wall stretch to stay \
-         joined, and doors and windows slide along their walls. With `end`, only that end of one wall moves",
+        "{ids: [id,…], by?: [dx, dy], up?, end?: start|end} moves elements in plan; walls joined to a moved wall stretch to \
+         stay joined, and doors and windows slide along their walls. With `end`, only that end of one wall moves. `up` (mm, \
+         down when less than 0) raises what sits at one height, its offset: point clouds, components, floors, ceilings and \
+         roofs; anything else refuses it. One of `by` and `up` is required",
         move_elements,
     ),
     edit(
@@ -7331,7 +7333,21 @@ fn align_element(s: &mut Session, p: &Value) -> R {
 fn move_elements(s: &mut Session, p: &Value) -> R {
     let c = "move";
     let ids = ids_param(c, &s.model, p)?;
-    let by = point_req(c, p, "by")?;
+    let up = num(c, p, "up")?;
+    let by = match (point_opt(c, p, "by")?, up) {
+        (Some(by), _) => by,
+        (None, Some(_)) => P2(0.0, 0.0),
+        (None, None) => return Err(bad(c, "`by` [dx, dy] or `up` (mm) is required")),
+    };
+    let up = up.filter(|u| *u != 0.0);
+    if up.is_some() {
+        for &id in &ids {
+            let e = s.model.elements.get(id).ok_or_else(|| bad(c, format!("no element {id}")))?;
+            if lifted(e, 0.0).is_none() {
+                return Err(bad(c, format!("{} {id} has no one height to move `up`: change its offsets, or leave it out", e.category())));
+            }
+        }
+    }
     // Moving one end: `Some(true)` the start, `Some(false)` the end.
     let end = match string(c, p, "end")?.as_deref() {
         None => None,
@@ -7343,7 +7359,30 @@ fn move_elements(s: &mut Session, p: &Value) -> R {
         return Err(bad(c, "`end` moves an end of one wall; give `ids` one wall"));
     }
     relocate(c, s, &ids, &Motion { map: &|q| q + by, slide: Some(by), mirror: false }, end)?;
+    if let Some(up) = up {
+        let m = s.model_mut();
+        for &id in &ids {
+            if let Some(e) = m.elements.get(id).and_then(|e| lifted(e, up)) {
+                m.elements.insert(id, e);
+            }
+        }
+    }
     Ok(json!({"moved": ids}))
+}
+
+/// The element `e` raised `up` mm, if it sits at one height, its offset; none if its height is more than that (a wall's base
+/// and top) or it has none.
+fn lifted(e: &Element, up: f64) -> Option<Element> {
+    let mut e = e.clone();
+    match &mut e {
+        Element::PointCloud(pc) => pc.offset += up,
+        Element::Component(k) => k.offset += up,
+        Element::Floor(f) => f.offset += up,
+        Element::Ceiling(k) => k.offset += up,
+        Element::Roof(r) => r.offset += up,
+        _ => return None,
+    }
+    Some(e)
 }
 
 fn copy(s: &mut Session, p: &Value) -> R {
