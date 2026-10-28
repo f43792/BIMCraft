@@ -693,7 +693,7 @@ fn a_linked_scan_keeps_every_point_in_the_cache_is_saved_by_its_link_and_reloade
     let file = std::env::temp_dir().join(format!("bimcraft-cloud-{}-link.bimcraft", std::process::id()));
     run(&mut s, "save", json!({"path": file}));
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(saved["format"], 6);
+    assert_eq!(saved["format"], crate::model::FORMAT);
     assert_eq!(saved["clouds"]["face"]["link"]["points"], 62_500);
     let mut t = Session::new();
     let opened = run(&mut t, "open", json!({"path": file}));

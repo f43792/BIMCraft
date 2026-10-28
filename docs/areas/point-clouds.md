@@ -140,7 +140,7 @@ no `spacing`), as Revit links a ReCap project: every point of its file is kept i
 project keeps only the upper levels of its tree, up to `PREVIEW_POINTS` (a million), to draw where the cache isn't. Its `Cloud`
 holds a `Link`: the file's whole path, the millimetres in its unit, the fingerprint of the file (FNV-1a of its size, when it was
 written, its first and last megabyte, how it's read and the cache's `VERSION`), and how many points it has. A project file holds
-it as the cloud's `link` (format 6; `CloudFile`'s `points` are the preview). The cache is opened the first time something asks
+it as the cloud's `link` (format 10; `CloudFile`'s `points` are the preview). The cache is opened the first time something asks
 (`Cloud::store`), found by the fingerprint in `cache::folder()`: `BIMCRAFT_SCAN_CACHE`, else the user's cache folder
 (`%LOCALAPPDATA%\BIMCraft\scans`, `~/Library/Caches/BIMCraft/scans`, `$XDG_CACHE_HOME/bimcraft/scans`); tests and front ends may
 say another (`cache::set_folder`). `Cloud::tree` is then the cache's, and `Cloud::node` a node's points, held (`NodePoints::Held`)

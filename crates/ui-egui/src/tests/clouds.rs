@@ -487,7 +487,8 @@ fn a_scan_linked_from_its_box_keeps_its_points_in_the_cache_and_reloads_from_the
     h.state_mut().point_cloud_paths(vec![path.clone()]);
     h.run();
     pick(&mut h, Role::CheckBox, "Link the file");
-    press(&mut h, "OK");
+    // Not `press`: the box asks for frames while the cache builds, which `run` would count against it.
+    h.get_by_label("OK").click();
     built(&mut h);
     let placed = scans(&h);
     assert_eq!(placed.len(), 1, "{}", h.state().status.text);

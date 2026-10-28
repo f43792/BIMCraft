@@ -1145,6 +1145,7 @@ impl BimApp {
         let units = model.units;
         // A note on a sheet sits in paper mm.
         let paper = matches!(model.elements.get(id), Some(Element::Text(n)) if model.sheet(n.view).is_some());
+        let scan = matches!(model.elements.get(id), Some(Element::PointCloud(_)));
         for group in groups {
             let open = !self.collapsed.contains(group);
             if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
@@ -1162,7 +1163,7 @@ impl BimApp {
                         let val = &v[key];
                         // A length one element hasn't got (a straight wall's radius), or the file of a scan that isn't
                         // linked: no row.
-                        if ids.len() == 1 && (matches!(kind, LengthShown | LengthIf) || key == "linked") && val.is_null() {
+                        if ids.len() == 1 && (matches!(kind, LengthShown | LengthIf) || key == "linked" && scan) && val.is_null() {
                             continue;
                         }
                         if ids.len() == 1 && !relevant(&first, key) {
