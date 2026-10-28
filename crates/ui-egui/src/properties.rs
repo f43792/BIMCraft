@@ -336,6 +336,8 @@ fn rows(category: &str) -> &'static [Row] {
             ("Identity Data", "linked", msg!("Linked File"), Shown),
             ("Other", "at", msg!("Origin"), Point),
             ("Other", "angle", "Angle", Number),
+            ("Other", "pitch", msg!("Pitch"), Number),
+            ("Other", "roll", msg!("Roll"), Number),
         ],
         "cadimport" => &[
             ("Constraints", "level", "Level", Level),

@@ -200,6 +200,106 @@ fn a_scans_grips_stand_round_its_middle_and_a_drag_about_it_turns_whole_degrees(
     assert_eq!(turned_by(c, c, on(45.0)), 0.0, "from its middle, no way round");
 }
 
+/// Whether two model points are within a hundredth of a millimetre.
+fn close(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-2)
+}
+
+#[test]
+fn a_scan_tilts_by_roll_and_pitch_about_its_middle_and_keeps_them_through_a_turn_and_its_file() {
+    use crate::model::{Element, Model};
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("tilt", "box.xyz", BOX)}))["id"].as_u64().unwrap();
+    let pc = |s: &Session| match s.model.elements.get(id) {
+        Some(Element::PointCloud(pc)) => pc.clone(),
+        _ => panic!("the scan is gone"),
+    };
+    let base = pc(&s);
+    let z0 = s.model.elevation(base.level) + base.offset;
+    let placed = |s: &Session, q: [f32; 3]| s.model.cloud_place(&pc(s))(q);
+    // Roll turns it about its own x: its y goes up. Pitch about its own y: its x goes down.
+    run(&mut s, "modify", json!({"id": id, "roll": 90}));
+    assert!(close(placed(&s, [0.0, 1000.0, 0.0]), [base.at.0, base.at.1, z0 + 1000.0]), "{:?}", placed(&s, [0.0, 1000.0, 0.0]));
+    run(&mut s, "modify", json!({"id": id, "roll": 0, "pitch": 90}));
+    assert!(close(placed(&s, [1000.0, 0.0, 0.0]), [base.at.0, base.at.1, z0 - 1000.0]), "{:?}", placed(&s, [1000.0, 0.0, 0.0]));
+    // The box round it follows: 4 m by 3 m by 2.5 m pitched a quarter turn stands 4 m tall.
+    let (lo, hi) = bounds(&s, id);
+    assert!(((hi[2] - lo[2]) - 4000.0).abs() < 1.0 && ((hi[0] - lo[0]) - 2500.0).abs() < 1.0, "{lo:?} {hi:?}");
+    // Turned about its origin, the tilt rides along: what stood up its own z now lies along x, turned to y.
+    run(&mut s, "rotate", json!({"ids": [id], "about": [base.at.0, base.at.1], "angle": 90}));
+    assert!(close(placed(&s, [0.0, 0.0, 1000.0]), [base.at.0, base.at.1 + 1000.0, z0]), "{:?}", placed(&s, [0.0, 0.0, 1000.0]));
+    assert_eq!((pc(&s).pitch, pc(&s).roll), (90.0, 0.0));
+    // Saved and read again, as it was; a scan with none writes none.
+    let (m, left_out) = Model::read(&s.model.to_json().unwrap()).unwrap();
+    assert_eq!((m.elements.get(id), left_out.len()), (s.model.elements.get(id), 0));
+    run(&mut s, "modify", json!({"id": id, "pitch": 0}));
+    assert!(!s.model.to_json().unwrap().contains("pitch"));
+    // A tilt goes a quarter turn either way at most: past it, it's refused, by name.
+    for (k, v) in [("pitch", 91.0), ("roll", -120.0)] {
+        let e = fails(&mut s, "modify", json!({"id": id, k: v}));
+        assert!(e.contains(k), "{e}");
+    }
+}
+
+#[test]
+fn a_plan_snaps_to_a_tilted_scan_where_its_cut_plane_cuts_it_now() {
+    let mut s = Session::new();
+    // The wall face along y = 0, 2 m long and 2 m tall, its middle 1 m up: rolled 30 degrees, the plan's cut at 1200 meets it
+    // 200 mm over its middle, 231 mm up its face, 115 mm south of where it stood.
+    let id =
+        run(&mut s, "point_cloud", json!({"path": scan("tilt-snap", "face.xyz", &sheet(None)), "origin": "file"}))["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": id, "roll": 30}));
+    let level = run(&mut s, "elements", json!({"category": "level"}))["elements"][0]["id"].as_u64().unwrap();
+    let reach = Reach { point: 100.0, line: 100.0 };
+    let f = snap(&s.model, level, P2(1003.0, -110.0), reach, &[], false, &Snaps::default());
+    assert!(f.kind == Kind::Point && (f.at.1 + 115.5).abs() < 25.0 && (f.at.0 - 1000.0).abs() < 15.0, "{f:?}");
+    // Where it stood upright there's nothing now.
+    assert_eq!(snap(&s.model, level, P2(1000.0, 60.0), reach, &[], false, &Snaps::default()).kind, Kind::Free);
+}
+
+#[test]
+fn align_cloud_with_tilt_fits_a_scans_roll_and_pitch_from_three_pairs() {
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("align-tilt", "box.xyz", BOX)}))["id"].as_u64().unwrap();
+    // Where its points should be: rolled -3 degrees, pitched 5, turned 20 about its origin and moved; as the scan would be.
+    run(&mut s, "modify", json!({"id": id, "roll": -3, "pitch": 5, "angle": 20, "at": [700, -400], "offset": 1600}));
+    let target = s.model.clone();
+    run(&mut s, "undo", json!({}));
+    let pc = |m: &crate::model::Model| match m.elements.get(id) {
+        Some(crate::model::Element::PointCloud(pc)) => pc.clone(),
+        _ => panic!("the scan is gone"),
+    };
+    let local: [[f32; 3]; 4] =
+        [[-2000.0, -1500.0, -1250.0], [2000.0, -1500.0, -900.0], [2000.0, 1500.0, -1250.0], [-2000.0, 1500.0, 1250.0]];
+    let from: Vec<[f64; 3]> = local.iter().map(|q| s.model.cloud_place(&pc(&s.model))(*q)).collect();
+    let to: Vec<[f64; 3]> = local.iter().map(|q| target.cloud_place(&pc(&target))(*q)).collect();
+    // Without `tilt`, three pairs in space fit the turn and the height alone, and the leftover says so.
+    let r = run(&mut s, "align_cloud", json!({"id": id, "from": from, "to": to}));
+    assert!(r["error"].as_f64().unwrap() > 50.0, "{r}");
+    run(&mut s, "undo", json!({}));
+    let r = run(&mut s, "align_cloud", json!({"id": id, "from": from, "to": to, "tilt": true}));
+    assert!(r["error"].as_f64().unwrap() < 1e-3, "{r}");
+    let (now, want) = (pc(&s.model), pc(&target));
+    for (a, b, what) in
+        [(now.roll, -3.0, "roll"), (now.pitch, 5.0, "pitch"), (now.angle, 20.0, "angle"), (now.offset, want.offset, "offset")]
+    {
+        assert!((a - b).abs() < 1e-6, "{what}: {a}, not {b}");
+    }
+    assert!(now.at.dist(want.at) < 1e-3, "{:?} {:?}", now.at, want.at);
+    // Tilt needs three pairs with a z each, not in one line.
+    for (p, says) in [
+        (json!({"id": id, "from": [[0, 0, 0], [1000, 0, 0]], "to": [[0, 0, 0], [1000, 0, 0]], "tilt": true}), "three"),
+        (json!({"id": id, "from": [[0, 0], [1000, 0], [0, 1000]], "to": [[0, 0], [1000, 0], [0, 1000]], "tilt": true}), "z"),
+        (
+            json!({"id": id, "from": [[0, 0, 0], [1000, 0, 0], [2000, 0, 0]], "to": [[0, 0, 0], [1000, 0, 0], [2000, 0, 0]], "tilt": true}),
+            "line",
+        ),
+    ] {
+        let e = fails(&mut s, "align_cloud", p.clone());
+        assert!(e.contains(says), "{p}: {e}");
+    }
+}
+
 #[test]
 fn align_cloud_fits_a_scan_onto_the_model_by_pairs_of_points_and_says_how_well() {
     let mut s = Session::new();
@@ -668,7 +768,7 @@ fn a_file_of_format_4_to_9_that_holds_scans_opens_as_this_builds_format() {
     // of this build's format once read.
     let mut file = project_file(2);
     assert_eq!(file["format"], crate::model::FORMAT);
-    for old in 4..=9 {
+    for old in 4..=10 {
         file["format"] = json!(old);
         let (m, left_out) = crate::model::Model::read(&file.to_string()).unwrap();
         assert_eq!((m.format, m.clouds.len(), left_out.len()), (crate::model::FORMAT, 2, 0));

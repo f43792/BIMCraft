@@ -179,11 +179,13 @@ pub static ALL: &[Command] = &[
         "align_cloud",
         "Align Point Cloud",
         &[],
-        "{id, from: [[x, y] or [x, y, z], …], to: [[x, y] or [x, y, z], …]} fits point cloud `id` onto the model: `from` are \
-         points on the scan as it stands, `to` where each should be, two pairs or more. It turns the scan about the vertical \
-         and moves it to fit them best (least squares); with a z on every point it moves it up or down too, by how far they \
-         are on average. Returns the turn (`angle`, degrees counter-clockwise), the move of its origin (`by`), `up`, and how \
-         far each point lands from where it should (`errors`, mm; `error` the largest)",
+        "{id, from: [[x, y] or [x, y, z], …], to: [[x, y] or [x, y, z], …], tilt?} fits point cloud `id` onto the model: \
+         `from` are points on the scan as it stands, `to` where each should be, two pairs or more. It turns the scan about the \
+         vertical and moves it to fit them best (least squares); with a z on every point it moves it up or down too, by how far \
+         they are on average. With `tilt`, three pairs or more with a z each, not in one line, fit its pitch and roll as well \
+         (a scan that wasn't level). Returns the turn (`angle`, degrees counter-clockwise), the move of its origin (`by`), `up`, \
+         with `tilt` its `pitch` and `roll`, and how far each point lands from where it should (`errors`, mm; `error` the \
+         largest)",
         align_cloud,
     ),
     edit(
@@ -1777,6 +1779,9 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("length".into(), json!(hundredth(rs.start.dist(rs.end))));
         }
         Element::PointCloud(pc) => {
+            // Its tilt, shown though a level scan's file leaves it out.
+            extra.insert("pitch".into(), json!(pc.pitch));
+            extra.insert("roll".into(), json!(pc.roll));
             if let Some(cloud) = m.clouds.get(&pc.cloud) {
                 extra.insert("points".into(), json!(cloud.count()));
                 extra.insert("source".into(), json!(cloud.source()));
@@ -3696,12 +3701,55 @@ fn place_cloud(s: &mut Session, p: &Value, level: Guid, name: String, scan: Clou
     if new {
         m.clouds.insert(name.clone(), scan);
     }
-    let id = m.insert(Element::PointCloud(PointCloud { cloud: name.clone(), level, at, offset, angle }));
+    let id = m.insert(Element::PointCloud(PointCloud { cloud: name.clone(), level, at, offset, angle, pitch: 0.0, roll: 0.0 }));
     Ok(json!({"id": id, "cloud": name, "points": points, "read": read, "linked": linked, "origin": origin}))
 }
 
 /// A linked scan read again from its file: its cache built again where the file has changed, or where this machine hasn't
 /// it, and the levels the project keeps of it with it.
+/// `align_cloud` with `tilt`: scan `id`, placed by `pc`, turned in space about the middle of the points `from` (each
+/// [x, y, z]) and moved, to lay them over `to` best (Horn's method, `cloud::placement::best_turn`).
+fn align_tilted(c: &str, s: &mut Session, id: Id, mut pc: PointCloud, from: &[Vec<f64>], to: &[Vec<f64>]) -> R {
+    use crate::cloud::placement::{angles, best_turn, then, turned};
+    let three = |q: &Vec<f64>| -> [f64; 3] { std::array::from_fn(|k| q.get(k).copied().unwrap_or(0.0)) };
+    let (from, to): (Vec<[f64; 3]>, Vec<[f64; 3]>) = (from.iter().map(three).collect(), to.iter().map(three).collect());
+    let middle = |ps: &[[f64; 3]]| -> [f64; 3] { std::array::from_fn(|k| ps.iter().map(|q| q[k]).sum::<f64>() / ps.len() as f64) };
+    let (cf, ct) = (middle(&from), middle(&to));
+    let less = |a: [f64; 3], b: [f64; 3]| -> [f64; 3] { std::array::from_fn(|k| a[k] - b[k]) };
+    let a: Vec<[f64; 3]> = from.iter().map(|q| less(*q, cf)).collect();
+    let b: Vec<[f64; 3]> = to.iter().map(|q| less(*q, ct)).collect();
+    // Three points not in a line: some two of them, from their middle, span an area.
+    let span = a
+        .iter()
+        .flat_map(|u| a.iter().map(move |v| (u[1] * v[2] - u[2] * v[1]).hypot(u[2] * v[0] - u[0] * v[2]).hypot(u[0] * v[1] - u[1] * v[0])))
+        .fold(0.0, f64::max);
+    if span < 1e4 {
+        return Err(bad(c, "the points on the scan are in one line: a tilt needs three that aren't"));
+    }
+    let turn = best_turn(&a, &b);
+    let place = s.model.cloud_placement(&pc);
+    let (angle, pitch, roll) = angles(&then(&place.turn(), &turn));
+    let at = turned(&turn, less(place.at, cf)).map(|v| v);
+    let at: [f64; 3] = std::array::from_fn(|k| at[k] + ct[k]);
+    let errors: Vec<f64> = a
+        .iter()
+        .zip(&b)
+        .map(|(u, v)| {
+            let d = less(turned(&turn, *u), *v);
+            d[0].hypot(d[1]).hypot(d[2])
+        })
+        .collect();
+    let (was, offset, heading) = (pc.at, pc.offset, pc.angle);
+    let base = s.model.elevation(pc.level);
+    (pc.at, pc.offset) = (micron(P2(at[0], at[1])), at[2] - base);
+    (pc.angle, pc.pitch, pc.roll) = (degrees(angle), degrees(pitch), degrees(roll));
+    let (by, up, turned_by) = (pc.at - was, pc.offset - offset, degrees((pc.angle - heading + 180.0).rem_euclid(360.0) - 180.0));
+    let (pitch, roll) = (pc.pitch, pc.roll);
+    s.model_mut().elements.insert(id, Element::PointCloud(pc));
+    let error = errors.iter().copied().fold(0.0, f64::max);
+    Ok(json!({"id": id, "angle": turned_by, "by": [by.0, by.1], "up": up, "pitch": pitch, "roll": roll, "error": error, "errors": errors}))
+}
+
 /// The most pairs of points `align_cloud` fits a scan by.
 const MAX_ALIGN: usize = 100;
 
@@ -3735,6 +3783,16 @@ fn align_cloud(s: &mut Session, p: &Value) -> R {
     let solid = from.iter().chain(&to).all(|q| q.len() == 3);
     if !solid && from.iter().chain(&to).any(|q| q.len() == 3) {
         return Err(bad(c, "give every point a z, to fit the height too, or none"));
+    }
+    if flag(c, p, "tilt")? {
+        if from.len() < 3 {
+            return Err(bad(c, "a tilt is fitted to three pairs of points at least"));
+        }
+        if !solid {
+            return Err(bad(c, "a tilt needs a z on every point"));
+        }
+        let pc = pc.clone();
+        return align_tilted(c, s, id, pc, &from, &to);
     }
     let at = |q: &[f64], k: usize| q.get(k).copied().unwrap_or(0.0);
     let flat = |q: &[f64]| P2(at(q, 0), at(q, 1));

@@ -69,7 +69,8 @@ pub const CEILING_CUT: f64 = 2300.0;
 pub const CEILING_HEIGHT: f64 = 2600.0;
 /// The steepest slope a floor or a roof may have, degrees.
 pub const MAX_SLOPE: f64 = 75.0;
-/// The version of the project file this build writes, and the newest it reads. 10: a scan may be linked (its `link`: its
+/// The version of the project file this build writes, and the newest it reads. 11: a scan may be tilted (its `pitch` and
+/// `roll`); a build that reads up to 10 would refuse the keys. 10: a scan may be linked (its `link`: its
 /// file and the fingerprint of its cache), holding only the upper levels of its tree; a build that reads up to 9 would refuse
 /// the key. 8: text types (`text_types`, library
 /// entries of kind `text-type`); a note names its type, which holds its size, and may override parts of its formatting
@@ -87,7 +88,7 @@ pub const MAX_SLOPE: f64 = 75.0;
 /// 2: the library has ids and GUIDs too
 /// (`library`), and what names a library entry holds its GUID. 1: elements have GUIDs, ids six digits, and what points at
 /// an element holds its GUID. None (0): a file from before.
-pub const FORMAT: u32 = 10;
+pub const FORMAT: u32 = 11;
 /// How far past the model a level reaches without an extent of its own, mm.
 pub const LEVEL_PAST: f64 = 1000.0;
 
@@ -674,8 +675,9 @@ pub struct Note {
     pub runs: Vec<crate::text::Run>,
 }
 
-/// A scan placed: the project's `cloud`, its middle at `at` in plan and `offset` mm over `level`, turned `angle` degrees
-/// (counter-clockwise) about its middle. It holds no `params`: phases and paint don't reach it.
+/// A scan placed: the project's `cloud`, its middle at `at` in plan and `offset` mm over `level`, tilted by `roll` degrees
+/// about its own x and `pitch` about its own y (a scan that wasn't level), then turned `angle` degrees (counter-clockwise)
+/// about its middle ([`crate::cloud::Placement`]). It holds no `params`: phases and paint don't reach it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PointCloud {
@@ -686,6 +688,10 @@ pub struct PointCloud {
     pub offset: f64,
     #[serde(default)]
     pub angle: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pitch: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub roll: f64,
 }
 
 /// A CAD drawing placed, Revit's import: the project's `cad`, its point `origin` (in its own units) on `at` on `level`, each of
@@ -2515,7 +2521,7 @@ impl Model {
         // 7 to 8: a note's size is its text type's. A note of a size gets a type of it.
         self.typed_notes();
         // 8 to 9: freely ordered graphic line segments; existing dash/space/dot patterns need no conversion.
-        // 9 to 10 (linked scans) has none: a file of 9 has none.
+        // 9 to 10 (linked scans) has none: a file of 9 has none. Nor 10 to 11 (a scan's pitch and roll).
         self.format = FORMAT;
     }
 
@@ -2709,15 +2715,16 @@ impl Model {
         self.level(level).map_or(0.0, |l| l.elevation)
     }
 
-    /// Where a placed scan's points are in the model, mm: each point about the scan's middle, turned by `angle` and moved to
-    /// `at`, `offset` over its level.
+    /// Where a placed scan's points are in the model, mm: each point about the scan's middle, tilted and turned, and moved to
+    /// `at`, `offset` over its level ([`Model::cloud_placement`]).
     pub fn cloud_place(&self, pc: &PointCloud) -> impl Fn([f32; 3]) -> [f64; 3] + use<> {
-        let (sin, cos) = pc.angle.to_radians().sin_cos();
-        let (at, z) = (pc.at, self.elevation(pc.level) + pc.offset);
-        move |p: [f32; 3]| {
-            let (x, y) = (f64::from(p[0]), f64::from(p[1]));
-            [at.0 + x * cos - y * sin, at.1 + x * sin + y * cos, z + f64::from(p[2])]
-        }
+        let place = self.cloud_placement(pc);
+        move |p: [f32; 3]| place.place(p.map(f64::from))
+    }
+
+    /// How a placed scan's points go into the model.
+    pub fn cloud_placement(&self, pc: &PointCloud) -> crate::cloud::Placement {
+        crate::cloud::Placement::new([pc.at.0, pc.at.1, self.elevation(pc.level) + pc.offset], pc.angle, pc.pitch, pc.roll)
     }
 
     /// The scans no point cloud places.
@@ -4575,6 +4582,11 @@ impl Model {
                     point(&format!("{who} at"), pc.at)?;
                     coord(&format!("{who} offset"), pc.offset)?;
                     coord(&format!("{who} angle"), pc.angle)?;
+                    for (name, tilt) in [("pitch", pc.pitch), ("roll", pc.roll)] {
+                        if tilt.is_nan() || tilt.abs() > 90.0 {
+                            return Err(format!("{who} {name}: {tilt} degrees; a scan tilts a quarter turn at most either way"));
+                        }
+                    }
                 }
                 Element::CadImport(ci) => {
                     if !self.cads.contains_key(&ci.cad) {

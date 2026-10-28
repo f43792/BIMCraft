@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 pub mod cache;
 mod e57;
 pub mod octree;
+pub mod placement;
 pub mod source;
 
+pub use placement::Placement;
 pub use source::{FileSource, Source};
 
 /// Points a project's scans may keep among them: a file with more is thinned down to what the others leave. A picture draws no
@@ -502,21 +504,53 @@ impl Cloud {
     }
 
     /// Of its points whose height from its middle lies within `z`, the nearest to `at` (from its middle, mm) seen from above and
-    /// no farther than `reach`: what a plan snaps to. It looks only in the squares of its [`Grid`] that `reach` touches.
+    /// no farther than `reach`: [`Cloud::nearest_placed`] for the scan as it stands in its file.
     pub fn nearest(&self, at: [f64; 2], reach: f64, z: (f64, f64)) -> Option<[f32; 3]> {
-        if !(reach.is_finite() && reach >= 0.0 && at.iter().all(|v| v.is_finite() && v.abs() <= MAX_FILE_COORD)) {
+        let level = Placement::new([0.0; 3], 0.0, 0.0, 0.0);
+        self.nearest_placed(&level, at, reach, z).map(|p| p.map(|v| v as f32))
+    }
+
+    /// Of its points as `place` puts them in the model, those whose height there lies within `z`, the nearest to `at` seen from
+    /// above and no farther than `reach`, as the model has it: what a plan snaps to. It looks only in the squares of its
+    /// [`Grid`] (or the nodes of its tree) that the box round what it's asked, turned into its own terms, touches.
+    pub fn nearest_placed(&self, place: &Placement, at: [f64; 2], reach: f64, z: (f64, f64)) -> Option<[f64; 3]> {
+        if !(reach.is_finite() && reach >= 0.0 && at.iter().all(|v| v.is_finite() && v.abs() <= MAX_FILE_COORD))
+            || z.0.is_nan()
+            || z.1.is_nan()
+        {
             return None;
         }
-        // Only the squares it has: none when `at` is far from it.
-        let (lo, hi) = self.bounds();
-        let (x0, x1) = (cell((at[0] - reach).max(lo[0])), cell((at[0] + reach).min(hi[0])));
-        let (y0, y1) = (cell((at[1] - reach).max(lo[1])), cell((at[1] + reach).min(hi[1])));
-        if x0 > x1 || y0 > y1 {
+        // The box it's asked about, in its own terms, and only where it has points: none when `at` is far from it.
+        let (blo, bhi) = self.bounds();
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for k in 0..8 {
+            let side = |bit: usize, a: f64, b: f64| if k >> bit & 1 == 0 { a } else { b };
+            let local = place.local([
+                side(0, at[0] - reach, at[0] + reach),
+                side(1, at[1] - reach, at[1] + reach),
+                side(2, z.0.max(-MAX_FILE_COORD), z.1.min(MAX_FILE_COORD)),
+            ]);
+            for i in 0..3 {
+                (lo[i], hi[i]) = (lo[i].min(local[i]), hi[i].max(local[i]));
+            }
+        }
+        let (lo, hi): ([f64; 3], [f64; 3]) = (std::array::from_fn(|i| lo[i].max(blo[i])), std::array::from_fn(|i| hi[i].min(bhi[i])));
+        if (0..3).any(|i| lo[i] > hi[i]) {
             return None;
         }
+        let mut best: Option<(f64, [f64; 3])> = None;
+        let mut weigh = |p: [f32; 3]| {
+            let q = place.place(p.map(f64::from));
+            let d = (q[0] - at[0]).hypot(q[1] - at[1]);
+            if d <= reach && (z.0..=z.1).contains(&q[2]) && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, q));
+            }
+        };
         if self.store().is_some() {
-            return self.nearest_in_tree(at, reach, z);
+            self.near_in_tree(lo, hi, &mut weigh);
+            return best.map(|(_, q)| q);
         }
+        let (x0, x1, y0, y1) = (cell(lo[0]), cell(hi[0]), cell(lo[1]), cell(hi[1]));
         let grid = self.grid.get_or_init(|| {
             let mut cells: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
             for (i, p) in self.points.iter().enumerate() {
@@ -524,44 +558,35 @@ impl Cloud {
             }
             Grid { cells }
         });
-        let mut best: Option<(f64, [f32; 3])> = None;
         for x in x0..=x1 {
             for y in y0..=y1 {
                 for &i in grid.cells.get(&(x, y)).into_iter().flatten() {
                     #[cfg(test)]
                     LOOKED.with(|n| n.set(n.get() + 1));
                     let Some(&p) = self.points.get(i as usize) else { continue };
-                    let d = (f64::from(p[0]) - at[0]).hypot(f64::from(p[1]) - at[1]);
-                    if d <= reach && (z.0..=z.1).contains(&f64::from(p[2])) && best.is_none_or(|(b, _)| d < b) {
-                        best = Some((d, p));
+                    if (lo[2]..=hi[2]).contains(&f64::from(p[2])) {
+                        weigh(p);
                     }
                 }
             }
         }
-        best.map(|(_, p)| p)
+        best.map(|(_, q)| q)
     }
 
-    /// As [`Cloud::nearest`], looking through the nodes of the tree whose cubes `reach` touches: a linked scan's, loaded.
-    fn nearest_in_tree(&self, at: [f64; 2], reach: f64, z: (f64, f64)) -> Option<[f32; 3]> {
+    /// Each point in the nodes of the tree whose cubes the box from `lo` to `hi` (from its middle) touches, to `weigh`: a
+    /// linked scan's, loaded.
+    fn near_in_tree(&self, lo: [f64; 3], hi: [f64; 3], weigh: &mut dyn FnMut([f32; 3])) {
         let tree = self.tree();
-        let mut best: Option<(f64, [f32; 3])> = None;
         let mut stack = vec![0_usize];
         while let Some(n) = stack.pop() {
             let Some(node) = tree.nodes().get(n) else { continue };
-            let (lo, hi) = (node.lo, node.hi());
-            let near = at[0] + reach >= lo[0] && at[0] - reach <= hi[0] && at[1] + reach >= lo[1] && at[1] - reach <= hi[1];
-            if !near || z.1 < lo[2] || z.0 > hi[2] {
+            let (a, b) = (node.lo, node.hi());
+            if (0..3).any(|i| hi[i] < a[i] || lo[i] > b[i]) {
                 continue;
             }
-            self.node(n).each(|p, _| {
-                let d = (f64::from(p[0]) - at[0]).hypot(f64::from(p[1]) - at[1]);
-                if d <= reach && (z.0..=z.1).contains(&f64::from(p[2])) && best.is_none_or(|(b, _)| d < b) {
-                    best = Some((d, p));
-                }
-            });
+            self.node(n).each(|p, _| weigh(p));
             stack.extend(node.children());
         }
-        best.map(|(_, p)| p)
     }
 
     /// The box round its points, from its middle, mm.

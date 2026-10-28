@@ -803,9 +803,8 @@ pub struct Scene {
 struct Scan {
     owner: Id,
     cloud: crate::cloud::Cloud,
-    /// Its middle in the model, and the cosine and sine of its turn.
-    at: P3,
-    turn: (f64, f64),
+    /// How its points go into the model.
+    placement: crate::cloud::Placement,
     /// The corners of the box round its points in the model, for fitting the view to it.
     corners: [P3; 8],
 }
@@ -815,9 +814,8 @@ impl Scan {
         self.place_mm(p.map(f64::from))
     }
 
-    fn place_mm(&self, [x, y, z]: P3) -> P3 {
-        let (cos, sin) = self.turn;
-        [self.at[0] + x * cos - y * sin, self.at[1] + x * sin + y * cos, self.at[2] + z]
+    fn place_mm(&self, p: P3) -> P3 {
+        self.placement.place(p)
     }
 
     /// How many pixels a millimetre of `node` is drawn, or none where none of it is seen: past the picture's edges, outside the
@@ -980,9 +978,7 @@ impl Scene {
                 let cloud = m.clouds.get(&pc.cloud)?;
                 let (lo, hi) = m.cloud_box(*id)?;
                 let corners = std::array::from_fn(|k| std::array::from_fn(|axis| if k >> axis & 1 == 0 { lo[axis] } else { hi[axis] }));
-                let (sin, cos) = pc.angle.to_radians().sin_cos();
-                let at = [pc.at.0, pc.at.1, m.elevation(pc.level) + pc.offset];
-                Some(Scan { owner: *id, cloud: cloud.clone(), at, turn: (cos, sin), corners })
+                Some(Scan { owner: *id, cloud: cloud.clone(), placement: m.cloud_placement(pc), corners })
             })
             .collect();
         Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases, masses, levels, scans, edges: OnceLock::new() }

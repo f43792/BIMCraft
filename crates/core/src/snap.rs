@@ -400,13 +400,8 @@ fn cloud_point(m: &Model, level: Id, p: P2, reach: f64, look: &Look) -> Option<P
         })
         .filter_map(|pc| {
             let cloud = m.clouds.get(&pc.cloud)?;
-            // The cursor in the scan's own terms: from its middle, turned back.
-            let base = m.elevation(pc.level) + pc.offset;
-            let (sin, cos) = pc.angle.to_radians().sin_cos();
-            let d = p - pc.at;
-            let local = [d.0 * cos + d.1 * sin, -d.0 * sin + d.1 * cos];
-            let q = cloud.nearest(local, reach, (cut - CUT_BAND - base, cut + CUT_BAND - base))?;
-            let [x, y, _] = m.cloud_place(pc)(q);
+            // Its points as the model has them, tilted and turned, about the cut plane.
+            let [x, y, _] = cloud.nearest_placed(&m.cloud_placement(pc), [p.0, p.1], reach, (cut - CUT_BAND, cut + CUT_BAND))?;
             Some(P2(x, y))
         })
         .min_by(|a, b| a.dist(p).total_cmp(&b.dist(p)))

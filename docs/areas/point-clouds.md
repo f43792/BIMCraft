@@ -119,6 +119,17 @@ picked wrong. In the desktop, a scan selected alone has Align to Model (the cont
 plan alternate a point on the scan (snapping to its points) and where it goes, each pair drawn as an arrow, and Enter fits it
 (`clouds::finish_align`), the status bar saying how near the points came.
 
+A scan that wasn't level when it was taken has a `pitch` and a `roll` (degrees, a quarter turn at most either way, which
+`Model::check` holds it to; format 11, and a level scan writes neither): its points are turned about its middle by the roll
+(about its own x), then the pitch (about its own y), then its angle, and moved to its place (`cloud::Placement`, which
+`Model::cloud_placement` makes and the plan, the section, the 3D view and its picking all place points with). `modify` sets
+them, and the Properties palette shows and edits them; `rotate` turns its heading and leaves the tilt. A plan snaps to a tilted
+scan where its cut plane cuts it now (`Cloud::nearest_placed`: the box round the cursor's reach and the cut band, turned into
+the scan's terms, picks the squares or nodes to look in, and each point is weighed as the model has it). `align_cloud` with
+`tilt` fits the turn in space as well, from three pairs or more with a z each and not in one line: Horn's closed form, the unit
+quaternion of the largest eigenvalue of a 4 by 4 matrix of the pairs' sums (`placement::best_turn`, its eigenvector by Jacobi's
+method), composed with the scan's own turn and taken apart again into angle, pitch and roll (`placement::angles`).
+
 ## Levels of detail
 
 A scan is drawn through an octree of its points (`cloud/octree.rs`), as Potree made standard, built the first time a picture
