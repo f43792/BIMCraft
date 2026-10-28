@@ -201,6 +201,51 @@ fn a_scans_grips_stand_round_its_middle_and_a_drag_about_it_turns_whole_degrees(
 }
 
 #[test]
+fn align_cloud_fits_a_scan_onto_the_model_by_pairs_of_points_and_says_how_well() {
+    let mut s = Session::new();
+    let id = run(&mut s, "point_cloud", json!({"path": scan("align", "box.xyz", BOX)}))["id"].as_u64().unwrap();
+    let placed = |s: &mut Session| {
+        let e = one(s);
+        let at = e["at"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+        (P2(at[0], at[1]), e["angle"].as_f64().unwrap(), e["offset"].as_f64().unwrap())
+    };
+    let (at, angle, offset) = placed(&mut s);
+    // Where the scan's points should be: turned 30 degrees about (1000, 0), moved (500, 200), and 100 mm up.
+    let (sin, cos) = 30_f64.to_radians().sin_cos();
+    let fit = |p: [f64; 3]| {
+        let (x, y) = (p[0] - 1000.0, p[1]);
+        [1000.0 + x * cos - y * sin + 500.0, x * sin + y * cos + 200.0, p[2] + 100.0]
+    };
+    let from = [[0.0, 0.0, 0.0], [2000.0, 0.0, 500.0], [0.0, 1500.0, 1000.0]];
+    let r = run(&mut s, "align_cloud", json!({"id": id, "from": from, "to": from.map(fit)}));
+    assert!((r["angle"].as_f64().unwrap() - 30.0).abs() < 1e-6 && r["error"].as_f64().unwrap() < 1e-6, "{r}");
+    assert!((r["up"].as_f64().unwrap() - 100.0).abs() < 1e-6, "{r}");
+    let (now, turned, up) = placed(&mut s);
+    let want = fit([at.0, at.1, 0.0]);
+    assert!(now.dist(P2(want[0], want[1])) < 1e-3, "{now:?}, not {want:?}");
+    assert!((turned - angle - 30.0).abs() < 1e-6 && (up - offset - 100.0).abs() < 1e-6, "{turned} {up}");
+    // Two pairs in plan turn and move it, its height as it was; a pair 10 mm out is the error it reports.
+    let r = run(&mut s, "align_cloud", json!({"id": id, "from": [[0, 0], [1000, 0]], "to": [[5000, 0], [5000, 1010]]}));
+    assert!((r["angle"].as_f64().unwrap() - 90.0).abs() < 1e-6 && r["up"] == json!(0.0), "{r}");
+    assert!((r["error"].as_f64().unwrap() - 5.0).abs() < 1e-6, "{r}");
+    assert_eq!(placed(&mut s).2, up, "two points in plan leave its height");
+    // What it refuses: one pair, lists of two lengths, points all in one place, something not a scan, a point out of range.
+    run(&mut s, "wall", json!({"points": [[0, 9000], [4000, 9000]]}));
+    let wall = run(&mut s, "elements", json!({"category": "wall"}))["elements"][0]["id"].clone();
+    for (p, says) in [
+        (json!({"id": id, "from": [[0, 0]], "to": [[1, 1]]}), "two"),
+        (json!({"id": id, "from": [[0, 0], [1000, 0]], "to": [[1, 1]]}), "as many"),
+        (json!({"id": id, "from": [[5, 5], [5, 5]], "to": [[0, 0], [1000, 0]]}), "apart"),
+        (json!({"id": wall, "from": [[0, 0], [1000, 0]], "to": [[0, 0], [1000, 0]]}), "point cloud"),
+        (json!({"id": id, "from": [[0, 0], [2e9, 0]], "to": [[0, 0], [1000, 0]]}), "from"),
+        (json!({"id": id, "from": [[0, 0, 0], [1000, 0]], "to": [[0, 0, 0], [1000, 0, 0]]}), "z"),
+    ] {
+        let e = fails(&mut s, "align_cloud", p.clone());
+        assert!(e.contains(says), "{p}: {e}");
+    }
+}
+
+#[test]
 fn move_up_lifts_a_scan_and_what_sits_at_one_height_but_not_a_wall() {
     let mut s = Session::new();
     let id = run(&mut s, "point_cloud", json!({"path": scan("lift", "box.xyz", BOX)}))["id"].as_u64().unwrap();

@@ -174,6 +174,8 @@ pub enum Tool {
     Spot,
     /// A ruler laid between two points: the first, once clicked.
     Measure(Option<P2>),
+    /// Align to Model, for the scan selected: the points picked, in pairs, each on the scan and then where it goes.
+    AlignCloud(Vec<P2>),
     /// Tag the door or window clicked.
     Tag,
     /// A section: its start, once clicked.
@@ -1124,6 +1126,7 @@ impl BimApp {
             | Tool::Rotate { .. }
             | Tool::Mirror { .. }
             | Tool::Align(_)
+            | Tool::AlignCloud(_)
             | Tool::Trim(_)
             | Tool::TrimTo { .. }
             | Tool::Vertex { .. }
@@ -1548,6 +1551,7 @@ impl BimApp {
                 (Tool::Mass(_), true) => self.finish_mass(level),
                 (Tool::DetailLine(_), true) => self.finish_detail_line(level),
                 (Tool::SketchLine(_), true) if self.shape().open_ended() => self.finish_open_shape(),
+                (Tool::AlignCloud(_), true) => self.finish_align(),
                 (_, true) => self.finish_wall(),
                 (_, false) => self.place_typed(level),
             }
@@ -2008,7 +2012,7 @@ impl BimApp {
             self.open_sheet(Sheet::View3D);
         }
         // Move, Copy, Rotate and Mirror take the selection; Align, Trim, Split and Offset pick walls, Demolish anything.
-        let edits = matches!(tool, Tool::Move(_) | Tool::Copy(_) | Tool::Rotate { .. } | Tool::Mirror { .. });
+        let edits = matches!(tool, Tool::Move(_) | Tool::Copy(_) | Tool::Rotate { .. } | Tool::Mirror { .. } | Tool::AlignCloud(_));
         let picks = matches!(
             tool,
             Tool::Align(_)
@@ -3641,6 +3645,15 @@ impl BimApp {
                 }
             });
         }
+        // A scan selected alone: fitting it onto the model by pairs of points.
+        if self.selected_scan().is_some() && matches!(self.tool, Tool::Modify | Tool::AlignCloud(_)) {
+            panel(ui, "Point Cloud", |ui| {
+                let tip = "Align to Model: click a point on the scan, then where it goes in the model, twice or more; Enter fits it";
+                if big_button(ui, Icon::Align, "Align to Model", matches!(self.tool, Tool::AlignCloud(_)), tip).clicked() {
+                    self.set_tool(Tool::AlignCloud(Vec::new()));
+                }
+            });
+        }
         // A floor selected: its slope arrow.
         if self.selected_floor().is_some() && matches!(self.tool, Tool::Modify | Tool::SlopeArrow(_)) {
             panel(ui, "Shape Editing", |ui| {
@@ -3979,6 +3992,9 @@ impl BimApp {
             Tool::Grid(None) => msg!("Click to enter the grid's start point."),
             Tool::Grid(Some(_)) => msg!("Click to enter the grid's end point."),
             Tool::Move(None) | Tool::Copy(None) => msg!("Click a base point to measure from."),
+            Tool::AlignCloud(pts) if pts.len() % 2 == 1 => msg!("Click where that point of the scan goes in the model."),
+            Tool::AlignCloud(pts) if pts.len() < 4 => msg!("Click a point on the scan: it snaps to the scan's points."),
+            Tool::AlignCloud(_) => msg!("Click another point on the scan, or press Enter to fit it to the pairs picked. Esc cancels."),
             Tool::Move(Some(_)) => msg!("Click where the base point goes, or type a distance and press Enter. Esc cancels."),
             Tool::Copy(Some(_)) => msg!("Click where the copy's base point goes, or type a distance and press Enter. Esc cancels."),
             Tool::Rotate { place: true, .. } => msg!("Click the centre of rotation."),

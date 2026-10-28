@@ -176,6 +176,17 @@ pub static ALL: &[Command] = &[
         cad_query,
     ),
     edit(
+        "align_cloud",
+        "Align Point Cloud",
+        &[],
+        "{id, from: [[x, y] or [x, y, z], …], to: [[x, y] or [x, y, z], …]} fits point cloud `id` onto the model: `from` are \
+         points on the scan as it stands, `to` where each should be, two pairs or more. It turns the scan about the vertical \
+         and moves it to fit them best (least squares); with a z on every point it moves it up or down too, by how far they \
+         are on average. Returns the turn (`angle`, degrees counter-clockwise), the move of its origin (`by`), `up`, and how \
+         far each point lands from where it should (`errors`, mm; `error` the largest)",
+        align_cloud,
+    ),
+    edit(
         "reload_cloud",
         "Reload Point Cloud",
         &[],
@@ -3691,6 +3702,80 @@ fn place_cloud(s: &mut Session, p: &Value, level: Guid, name: String, scan: Clou
 
 /// A linked scan read again from its file: its cache built again where the file has changed, or where this machine hasn't
 /// it, and the levels the project keeps of it with it.
+/// The most pairs of points `align_cloud` fits a scan by.
+const MAX_ALIGN: usize = 100;
+
+fn align_cloud(s: &mut Session, p: &Value) -> R {
+    let c = "align_cloud";
+    let id = element_id(c, &s.model, p.get("id").ok_or_else(|| bad(c, "`id` is required: the point cloud to align"))?)?;
+    let Some(Element::PointCloud(pc)) = s.model.elements.get(id) else {
+        return Err(bad(c, format!("element {id} is not a point cloud")));
+    };
+    let list = |key: &str| -> Result<Vec<Vec<f64>>, String> {
+        let a = p.get(key).and_then(Value::as_array).ok_or_else(|| bad(c, format!("`{key}` [[x, y] or [x, y, z], …] is required")))?;
+        if a.len() > MAX_ALIGN {
+            return Err(bad(c, format!("`{key}` has more than {MAX_ALIGN} points")));
+        }
+        a.iter()
+            .map(|v| {
+                let q = v.as_array().filter(|q| matches!(q.len(), 2 | 3)).and_then(|q| {
+                    q.iter().map(|x| x.as_f64().filter(|x| x.is_finite() && x.abs() <= MAX_COORD)).collect::<Option<Vec<f64>>>()
+                });
+                q.ok_or_else(|| bad(c, format!("`{key}`: {v} is not a point [x, y] or [x, y, z] in mm")))
+            })
+            .collect()
+    };
+    let (from, to) = (list("from")?, list("to")?);
+    if from.len() != to.len() {
+        return Err(bad(c, "`from` and `to` hold as many points: each point on the scan, and where it goes"));
+    }
+    if from.len() < 2 {
+        return Err(bad(c, "two pairs of points at least: a point on the scan and where it goes, twice"));
+    }
+    let solid = from.iter().chain(&to).all(|q| q.len() == 3);
+    if !solid && from.iter().chain(&to).any(|q| q.len() == 3) {
+        return Err(bad(c, "give every point a z, to fit the height too, or none"));
+    }
+    let at = |q: &[f64], k: usize| q.get(k).copied().unwrap_or(0.0);
+    let flat = |q: &[f64]| P2(at(q, 0), at(q, 1));
+    let n = from.len() as f64;
+    let mean = |ps: &[Vec<f64>], k: usize| ps.iter().map(|q| at(q, k)).sum::<f64>() / n;
+    let (cf, ct) = (P2(mean(&from, 0), mean(&from, 1)), P2(mean(&to, 0), mean(&to, 1)));
+    if from.iter().all(|q| flat(q).dist(cf) < 1.0) {
+        return Err(bad(c, "the points on the scan are all in one place: pick them apart"));
+    }
+    // The turn that best lays the points on the scan over their places, about their middles (least squares).
+    let (mut cross, mut dot) = (0.0, 0.0);
+    for (a, b) in from.iter().zip(&to) {
+        let (a, b) = (flat(a) - cf, flat(b) - ct);
+        cross += a.0 * b.1 - a.1 * b.0;
+        dot += a.0 * b.0 + a.1 * b.1;
+    }
+    let turn = cross.atan2(dot);
+    let (sin, cos) = turn.sin_cos();
+    let map = move |q: P2| {
+        let d = q - cf;
+        ct + P2(d.0 * cos - d.1 * sin, d.0 * sin + d.1 * cos)
+    };
+    let up = if solid { mean(&to, 2) - mean(&from, 2) } else { 0.0 };
+    let errors: Vec<f64> = from
+        .iter()
+        .zip(&to)
+        .map(|(a, b)| {
+            let d = map(flat(a)) - flat(b);
+            d.0.hypot(d.1).hypot(at(a, 2) + up - at(b, 2))
+        })
+        .collect();
+    let mut pc = pc.clone();
+    let was = pc.at;
+    let (moved, angle) = turned(&map, pc.at, pc.angle);
+    (pc.at, pc.angle, pc.offset) = (micron(moved), angle, pc.offset + up);
+    let by = pc.at - was;
+    s.model_mut().elements.insert(id, Element::PointCloud(pc));
+    let error = errors.iter().copied().fold(0.0, f64::max);
+    Ok(json!({"id": id, "angle": degrees(turn.to_degrees()), "by": [by.0, by.1], "up": up, "error": error, "errors": errors}))
+}
+
 fn reload_cloud(s: &mut Session, p: &Value) -> R {
     let c = "reload_cloud";
     let name = string(c, p, "cloud")?.ok_or_else(|| bad(c, "`cloud` is required: the name of a linked scan"))?;

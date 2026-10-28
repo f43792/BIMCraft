@@ -17,10 +17,10 @@ use egui::{
 };
 use serde_json::{Value, json};
 
-use crate::BimApp;
 use crate::lang::{t, tf};
 use crate::properties::number;
 use crate::style::pal;
+use crate::{BimApp, Tool};
 
 /// How far from a selected scan's middle its grips in the 3D view stand, in points.
 const SCAN_REACH: f32 = 60.0;
@@ -262,6 +262,34 @@ impl BimApp {
                 self.run("reload_cloud", json!({"cloud": name}));
             }
             (Then::Reload(name), Err(e)) => self.status = crate::Status { text: format!("{name}: {e}"), error: true },
+        }
+    }
+
+    /// The scan the selection is, when it's one point cloud alone.
+    pub(crate) fn selected_scan(&self) -> Option<Id> {
+        match self.selection.as_slice() {
+            &[id] if matches!(self.session.model.elements.get(id), Some(Element::PointCloud(_))) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Enter in Align to Model: the scan fitted onto the pairs of points picked (`align_cloud`), and how near they came said
+    /// on the status bar; with fewer than two pairs, it says so and waits for more.
+    pub(crate) fn finish_align(&mut self) {
+        let (Tool::AlignCloud(pts), Some(id)) = (&self.tool, self.selected_scan()) else { return };
+        if pts.len() < 4 {
+            self.status = crate::Status {
+                text: t("Pick two pairs of points at least: a point on the scan, then where it goes.").into(),
+                error: true,
+            };
+            return;
+        }
+        let pair = |first: usize| pts.iter().take(pts.len() / 2 * 2).skip(first).step_by(2).map(|q| [q.0, q.1]).collect::<Vec<_>>();
+        let p = json!({"id": id, "from": pair(0), "to": pair(1)});
+        if let Some(r) = self.run("align_cloud", p) {
+            self.tool = Tool::Modify;
+            let error = self.session.model.units.with_unit(r["error"].as_f64().unwrap_or(0.0));
+            self.status = crate::Status { text: tf("Aligned: every point picked lands within {} of its place.", &[&error]), error: false };
         }
     }
 

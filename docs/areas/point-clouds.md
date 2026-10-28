@@ -110,6 +110,15 @@ each of x, y and z from the middle of its box, a drag on which runs `move` (`up`
 turned 225°, a drag on which turns it about its middle (`rotate`, to whole degrees, `view3d::turned_by`); its box shows where
 it goes as the drag does, and each drag is one undo.
 
+`align_cloud` fits a scan onto the model by pairs of points, each on the scan as it stands (`from`) and where it should be
+(`to`), two or more: the turn about the vertical that lays them over each other best, about their middles (least squares, the
+angle from the sums of the cross and dot products of the pairs as seen from their middles), then the move of the middles; with
+a z on every point, the mean difference in z raises or lowers it. It changes the element's `at`, `angle` and `offset` as `rotate`
+does (`commands::turned`) and says how far each point lands from its place (`errors`; `error` the largest), which shows a pair
+picked wrong. In the desktop, a scan selected alone has Align to Model (the contextual tab's Point Cloud panel): clicks in a
+plan alternate a point on the scan (snapping to its points) and where it goes, each pair drawn as an arrow, and Enter fits it
+(`clouds::finish_align`), the status bar saying how near the points came.
+
 ## Levels of detail
 
 A scan is drawn through an octree of its points (`cloud/octree.rs`), as Potree made standard, built the first time a picture

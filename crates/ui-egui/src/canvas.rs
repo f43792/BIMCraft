@@ -1522,6 +1522,13 @@ impl BimApp {
                     (false, Some(from)) => return self.turn(centre, angle_between(centre, from, v.mm(at), self.snaps.angle)),
                 };
             }
+            // Align to Model: a point on the scan, then where it goes, and so on until Enter.
+            Tool::AlignCloud(_) => {
+                let p = self.snap(m, level, v, at, &[], mods.shift).at;
+                if let Tool::AlignCloud(pts) = &mut self.tool {
+                    pts.push(p);
+                }
+            }
             // A ruler: its start, then its end, which stays on show until Esc or another start.
             &Tool::Measure(first) => {
                 let p = self.snap(m, level, v, at, first.as_slice(), mods.shift).at;
@@ -2754,6 +2761,22 @@ impl BimApp {
                 with.push(self.found(sc, q, pts, false));
                 if let Ok(r) = self.extrusion_roof(m, level, &with) {
                     sketched(&Element::Roof(r));
+                }
+                return;
+            }
+            // Align to Model's pairs, each from its point on the scan to where it goes, and the one under way to the cursor.
+            Tool::AlignCloud(pts) => {
+                let mut ends: Vec<Pos2> = pts.iter().map(|q| sc.screen(*q)).collect();
+                if pts.len() % 2 == 1 {
+                    ends.push(sc.screen(self.found(sc, q, &[], shift)));
+                }
+                for pair in ends.chunks(2) {
+                    if let [a, b] = pair {
+                        p.arrow(*a, *b - *a, stroke);
+                    }
+                }
+                for (k, e) in ends.iter().enumerate() {
+                    p.circle_stroke(*e, 4.0, if k % 2 == 0 { stroke } else { thin });
                 }
                 return;
             }

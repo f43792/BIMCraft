@@ -161,6 +161,34 @@ fn a_scan_selected_in_the_3d_view_moves_along_its_arrows_and_turns_by_its_handle
 }
 
 #[test]
+fn align_to_model_fits_a_scan_onto_the_pairs_of_points_picked() {
+    let path = face("align", "face.xyz", 0.0);
+    let mut h = app(&format!("point_cloud {}", json!({"path": path, "origin": "file"})));
+    let id = scans(&h)[0];
+    let placed = |h: &Harness<BimApp>| match h.state().session.model.elements.get(id) {
+        Some(Element::PointCloud(pc)) => (pc.at, pc.angle),
+        _ => panic!("the scan is gone"),
+    };
+    let (at, angle) = placed(&h);
+    click(&mut h, P2(1000.0, 0.0));
+    assert_eq!(h.state().selection, [id]);
+    press(&mut h, "Align to Model");
+    assert!(matches!(h.state().tool, Tool::AlignCloud(_)), "{:?}", h.state().tool);
+    // Each point on the scan (it snaps to the scan's points), then where it goes: the face's ends onto a line running north.
+    let steps = h.state().session.history().len();
+    for p in [P2(12.0, 9.0), P2(3000.0, 3000.0), P2(1990.0, -8.0), P2(3000.0, 5000.0)] {
+        click(&mut h, p);
+    }
+    assert_eq!(h.state().session.history().len(), steps, "nothing until Enter");
+    key(&mut h, Key::Enter);
+    let (now, turned) = placed(&h);
+    let want = P2(3000.0 - at.1, 4000.0 + at.0 - 1000.0);
+    assert!(now.dist(want) < 1e-3 && (turned - angle - 90.0).abs() < 1e-6, "{now:?} {turned}, not {want:?}");
+    assert_eq!((h.state().tool.clone(), h.state().selection.clone()), (Tool::Modify, vec![id]));
+    assert!(!h.state().status.error && h.state().status.text.contains("Aligned"), "{}", h.state().status.text);
+}
+
+#[test]
 fn insert_point_cloud_brings_the_files_picked_in_as_one_scan_and_selects_it() {
     let mut h = app(BOX);
     press(&mut h, "Insert");
