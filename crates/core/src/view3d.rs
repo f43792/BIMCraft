@@ -1321,37 +1321,37 @@ impl Scene {
         let half = DOT as f64 / 2.0;
         for (&(n, scan), nodes) in kept.iter().zip(chosen) {
             let slot = (self.tris.len() + n) as u32;
-            let (tree, points, colours) = (scan.cloud.tree(), scan.cloud.points(), scan.cloud.colours());
-            for i in nodes.into_iter().flat_map(|node| tree.points_of(node)).map(|&i| i as usize) {
-                let Some(p) = points.get(i) else { continue };
-                let at = scan.place(*p);
-                if cut.is_some_and(|k| !k.holds(at)) {
-                    continue;
-                }
-                let (x, y, z) = cam.project(at);
-                if clip.is_some_and(|k| {
-                    z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
-                }) {
-                    continue;
-                }
-                let (x0, y0) = ((x - half).round(), (y - half).round());
-                if !(x0 > -(DOT as f64) && y0 > -(DOT as f64) && x0 < w as f64 && y0 < h as f64 && z.is_finite()) {
-                    continue;
-                }
-                let base = colours.and_then(|c| c.get(i)).map_or(grey, |c| Rgb(c[0], c[1], c[2]));
-                let colour = if plain { base } else { look.surface(scan.owner, base) };
-                let z = z as f32;
-                let (x0, y0) = (x0 as i64, y0 as i64);
-                for py in y0.max(0)..(y0 + DOT as i64).min(h as i64) {
-                    for px in x0.max(0)..(x0 + DOT as i64).min(w as i64) {
-                        let k = py as usize * w + px as usize;
-                        if let (Some(d), Some(s), Some(c)) = (depth.get_mut(k), hit.get_mut(k), dots.get_mut(k))
-                            && z > *d
-                        {
-                            (*d, *s, *c) = (z, slot, colour);
+            for node in nodes {
+                scan.cloud.node(node).each(|p, c| {
+                    let at = scan.place(p);
+                    if cut.is_some_and(|k| !k.holds(at)) {
+                        return;
+                    }
+                    let (x, y, z) = cam.project(at);
+                    if clip.is_some_and(|k| {
+                        z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
+                    }) {
+                        return;
+                    }
+                    let (x0, y0) = ((x - half).round(), (y - half).round());
+                    if !(x0 > -(DOT as f64) && y0 > -(DOT as f64) && x0 < w as f64 && y0 < h as f64 && z.is_finite()) {
+                        return;
+                    }
+                    let base = c.map_or(grey, |c| Rgb(c[0], c[1], c[2]));
+                    let colour = if plain { base } else { look.surface(scan.owner, base) };
+                    let z = z as f32;
+                    let (x0, y0) = (x0 as i64, y0 as i64);
+                    for py in y0.max(0)..(y0 + DOT as i64).min(h as i64) {
+                        for px in x0.max(0)..(x0 + DOT as i64).min(w as i64) {
+                            let k = py as usize * w + px as usize;
+                            if let (Some(d), Some(s), Some(c)) = (depth.get_mut(k), hit.get_mut(k), dots.get_mut(k))
+                                && z > *d
+                            {
+                                (*d, *s, *c) = (z, slot, colour);
+                            }
                         }
                     }
-                }
+                });
             }
         }
         dots

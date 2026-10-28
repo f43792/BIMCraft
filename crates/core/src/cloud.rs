@@ -1,7 +1,8 @@
 //! Point clouds: what a laser scan brings in. A file's points are read from public specifications
 //! (PTS and XYZ text, PLY, ASPRS LAS 1.2 to 1.4, ASTM E57), turned into millimetres, thinned to what a project
 //! may hold, and kept about their centre as `f32`, which holds a millimetre across `MAX_SPAN`. A
-//! project holds each scan once, as a [`Cloud`]; a `PointCloud` element places it.
+//! project holds each scan once, as a [`Cloud`]; a `PointCloud` element places it. A linked scan keeps every point of its
+//! file in the user's cache ([`cache`]), and the project only the upper levels of its tree, to draw where the cache isn't.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -97,6 +98,11 @@ pub fn unit(name: &str) -> Option<f64> {
         _ => None,
     }
 }
+
+/// A file larger than this, bytes, is linked unless `point_cloud` is told not to.
+pub const LINK_ABOVE: u64 = 256 << 20;
+/// The longest path a linked scan's file may have, characters.
+pub const MAX_PATH: usize = 4096;
 
 /// The points read from a file.
 #[derive(Clone, Debug, PartialEq)]
@@ -194,6 +200,77 @@ pub struct Cloud {
     grid: Arc<OnceLock<Grid>>,
     /// Its points by level of detail, made the first time it's drawn.
     tree: Arc<OnceLock<octree::Octree>>,
+    /// Where all its points are, when it's linked: its own are the upper levels of its tree.
+    link: Option<Arc<Link>>,
+}
+
+/// Where a linked scan's points are: the file it was built from, the fingerprint its cache is found by, how many points it
+/// holds, and the cache, opened the first time it's asked for.
+pub struct Link {
+    path: String,
+    /// The millimetres in a unit of its file.
+    scale: f64,
+    fingerprint: u64,
+    points: u64,
+    store: OnceLock<Option<cache::Store>>,
+}
+
+impl Link {
+    /// The file it was built from, as it was when it was linked.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// The millimetres in a unit of its file, as it was read.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// The points of its file, every one in its cache.
+    pub fn points(&self) -> u64 {
+        self.points
+    }
+}
+
+/// The points of one node of a cloud's tree, held or loaded.
+pub enum NodePoints<'a> {
+    Held { order: &'a [u32], points: &'a [[f32; 3]], colours: Option<&'a [[u8; 3]]> },
+    Loaded(Arc<cache::Block>),
+}
+
+impl NodePoints<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            NodePoints::Held { order, .. } => order.len(),
+            NodePoints::Loaded(b) => b.points.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Hands each point, from the cloud's middle, mm, and its colour if the cloud has colours, to `f`.
+    pub fn each(&self, mut f: impl FnMut([f32; 3], Option<[u8; 3]>)) {
+        match self {
+            NodePoints::Held { order, points, colours } => {
+                for &i in order.iter() {
+                    if let Some(p) = points.get(i as usize) {
+                        f(*p, colours.and_then(|c| c.get(i as usize)).copied());
+                    }
+                }
+            }
+            NodePoints::Loaded(b) => {
+                for (k, p) in b.points.iter().enumerate() {
+                    f(*p, b.colours.as_ref().and_then(|c| c.get(k)).copied());
+                }
+            }
+        }
+    }
 }
 
 /// A cloud's points by the square [`CELL`] mm wide they lie in, seen from above.
@@ -207,7 +284,7 @@ fn cell(v: f64) -> i64 {
 
 impl std::fmt::Debug for Cloud {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cloud({:?}, {} points)", self.source, self.points.len())
+        write!(f, "Cloud({:?}, {} points{})", self.source, self.points.len(), if self.link.is_some() { ", linked" } else { "" })
     }
 }
 
@@ -219,6 +296,8 @@ impl PartialEq for Cloud {
             && self.read == other.read
             && (Arc::ptr_eq(&self.points, &other.points) || self.points == other.points)
             && self.colours == other.colours
+            && self.link.as_ref().map(|l| (&l.path, l.scale, l.fingerprint, l.points))
+                == other.link.as_ref().map(|l| (&l.path, l.scale, l.fingerprint, l.points))
     }
 }
 
@@ -301,7 +380,71 @@ impl Cloud {
             packed: Arc::default(),
             grid: Arc::default(),
             tree: Arc::default(),
+            link: None,
         })
+    }
+
+    /// The scan of the file at `path`, read in units of `scale` mm, whose cache is `store`: the project keeps the upper levels
+    /// of its tree, no more than [`cache::PREVIEW_POINTS`], and finds the rest in the cache by its fingerprint.
+    pub fn linked(path: &str, scale: f64, store: cache::Store) -> Result<Cloud, String> {
+        let preview = store.preview(cache::PREVIEW_POINTS);
+        let h = store.header().clone();
+        let source = std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned());
+        let link = Link { path: path.to_string(), scale, fingerprint: h.fingerprint, points: store.points(), store: OnceLock::new() };
+        let _ = link.store.set(Some(store));
+        Cloud::with_link(source, h.origin, h.read, preview, link, (h.lo, h.hi))
+    }
+
+    fn with_link(
+        source: String,
+        origin: [f64; 3],
+        read: u64,
+        preview: cache::Block,
+        link: Link,
+        (lo, hi): ([f32; 3], [f32; 3]),
+    ) -> Result<Cloud, String> {
+        if link.path.is_empty() || link.path.chars().count() > MAX_PATH {
+            return Err(format!("a linked scan's file is a path of 1 to {MAX_PATH} characters"));
+        }
+        if !(link.scale.is_finite() && link.scale > 0.0) {
+            return Err(format!("a unit of {} mm isn't one", link.scale));
+        }
+        if link.points == 0 || link.points > cache::MAX_POINTS || read < link.points {
+            return Err(format!("a linked scan holds 1 to {} points, and no more than its file", cache::MAX_POINTS));
+        }
+        if preview.points.len() > cache::PREVIEW_POINTS {
+            return Err(format!("a linked scan keeps up to {} points in the project", cache::PREVIEW_POINTS));
+        }
+        if !lo.iter().chain(&hi).all(|v| v.is_finite() && f64::from(v.abs()) <= MAX_SPAN) || (0..3).any(|k| lo[k] > hi[k]) {
+            return Err("a linked scan's box isn't one".into());
+        }
+        let read = usize::try_from(read).unwrap_or(usize::MAX);
+        let source: String = source.chars().take(crate::model::MAX_TEXT).collect();
+        let mut cloud = Cloud::checked(source, Vec::new(), origin, read, preview.points, preview.colours)?;
+        (cloud.lo, cloud.hi) = (lo, hi);
+        cloud.link = Some(Arc::new(link));
+        Ok(cloud)
+    }
+
+    /// Where all its points are, when it's linked.
+    pub fn link(&self) -> Option<&Link> {
+        self.link.as_deref()
+    }
+
+    /// A linked scan's cache, if it's on this machine and whole: opened the first time it's asked for.
+    pub fn store(&self) -> Option<&cache::Store> {
+        let link = self.link.as_deref()?;
+        link.store.get_or_init(|| cache::path_of(link.fingerprint).and_then(|p| cache::Store::open(&p, link.fingerprint).ok())).as_ref()
+    }
+
+    /// Whether all its points are at hand: held, or linked and its cache found.
+    pub fn loaded(&self) -> bool {
+        self.link.is_none() || self.store().is_some()
+    }
+
+    /// All the points it has: those it holds, or a linked scan's, in its cache.
+    pub fn count(&self) -> u64 {
+        self.link.as_ref().map_or(self.points.len() as u64, |l| l.points)
     }
 
     /// The file it was read from.
@@ -341,9 +484,21 @@ impl Cloud {
         self.colours.as_deref().map(Vec::as_slice)
     }
 
-    /// Its points by level of detail: what a picture chooses what to draw from.
+    /// Its points by level of detail: what a picture chooses what to draw from. A linked scan's is its cache's, where it's
+    /// found, else that of the points it holds.
     pub fn tree(&self) -> &octree::Octree {
+        if let Some(store) = self.store() {
+            return store.tree();
+        }
         self.tree.get_or_init(|| octree::Octree::build(&self.points))
+    }
+
+    /// The points of node `node` of its [`Cloud::tree`]: a linked scan's loaded from its cache (and kept a while).
+    pub fn node(&self, node: usize) -> NodePoints<'_> {
+        if let Some(store) = self.store() {
+            return NodePoints::Loaded(store.block(node));
+        }
+        NodePoints::Held { order: self.tree().points_of(node), points: &self.points, colours: self.colours() }
     }
 
     /// Of its points whose height from its middle lies within `z`, the nearest to `at` (from its middle, mm) seen from above and
@@ -358,6 +513,9 @@ impl Cloud {
         let (y0, y1) = (cell((at[1] - reach).max(lo[1])), cell((at[1] + reach).min(hi[1])));
         if x0 > x1 || y0 > y1 {
             return None;
+        }
+        if self.store().is_some() {
+            return self.nearest_in_tree(at, reach, z);
         }
         let grid = self.grid.get_or_init(|| {
             let mut cells: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
@@ -383,6 +541,29 @@ impl Cloud {
         best.map(|(_, p)| p)
     }
 
+    /// As [`Cloud::nearest`], looking through the nodes of the tree whose cubes `reach` touches: a linked scan's, loaded.
+    fn nearest_in_tree(&self, at: [f64; 2], reach: f64, z: (f64, f64)) -> Option<[f32; 3]> {
+        let tree = self.tree();
+        let mut best: Option<(f64, [f32; 3])> = None;
+        let mut stack = vec![0_usize];
+        while let Some(n) = stack.pop() {
+            let Some(node) = tree.nodes().get(n) else { continue };
+            let (lo, hi) = (node.lo, node.hi());
+            let near = at[0] + reach >= lo[0] && at[0] - reach <= hi[0] && at[1] + reach >= lo[1] && at[1] - reach <= hi[1];
+            if !near || z.1 < lo[2] || z.0 > hi[2] {
+                continue;
+            }
+            self.node(n).each(|p, _| {
+                let d = (f64::from(p[0]) - at[0]).hypot(f64::from(p[1]) - at[1]);
+                if d <= reach && (z.0..=z.1).contains(&f64::from(p[2])) && best.is_none_or(|(b, _)| d < b) {
+                    best = Some((d, p));
+                }
+            });
+            stack.extend(node.children());
+        }
+        best.map(|(_, p)| p)
+    }
+
     /// The box round its points, from its middle, mm.
     pub fn bounds(&self) -> ([f64; 3], [f64; 3]) {
         (self.lo.map(f64::from), self.hi.map(f64::from))
@@ -399,6 +580,14 @@ impl Cloud {
                 read: self.read,
                 points: crate::commands::base64(&deflate(&points)),
                 colours: colours.map(|c| crate::commands::base64(&deflate(&c))),
+                link: self.link.as_ref().map(|l| LinkFile {
+                    path: l.path.clone(),
+                    scale: l.scale,
+                    fingerprint: format!("{:016x}", l.fingerprint),
+                    points: l.points,
+                    lo: self.lo,
+                    hi: self.hi,
+                }),
             }
         })
     }
@@ -417,6 +606,22 @@ struct CloudFile {
     points: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     colours: Option<String>,
+    /// A linked scan's: its points are the upper levels of its tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link: Option<LinkFile>,
+}
+
+/// How a project file holds where a linked scan's points are: its file and the millimetres in its unit, the fingerprint (16 hexadecimal digits) its cache is
+/// found by, its points, and the box round them all, from its middle, mm.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkFile {
+    path: String,
+    scale: f64,
+    fingerprint: String,
+    points: u64,
+    lo: [f32; 3],
+    hi: [f32; 3],
 }
 
 pub(crate) fn deflate(bytes: &[u8]) -> Vec<u8> {
@@ -459,8 +664,24 @@ impl TryFrom<CloudFile> for Cloud {
             Some(text) => Some(inflate(text, MAX_CLOUD_POINTS * 3)?.as_chunks::<3>().0.to_vec()),
             None => None,
         };
-        let cloud =
-            Cloud::checked(f.source.chars().take(crate::model::MAX_TEXT).collect(), f.stations.clone(), f.origin, f.read, points, colours)?;
+        let cloud = match &f.link {
+            Some(l) => {
+                let fingerprint = u64::from_str_radix(&l.fingerprint, 16)
+                    .ok()
+                    .filter(|_| l.fingerprint.len() == 16)
+                    .ok_or("a linked scan's fingerprint is 16 hexadecimal digits")?;
+                let link = Link { path: l.path.clone(), scale: l.scale, fingerprint, points: l.points, store: OnceLock::new() };
+                Cloud::with_link(f.source.clone(), f.origin, f.read as u64, cache::Block { points, colours }, link, (l.lo, l.hi))?
+            }
+            None => Cloud::checked(
+                f.source.chars().take(crate::model::MAX_TEXT).collect(),
+                f.stations.clone(),
+                f.origin,
+                f.read,
+                points,
+                colours,
+            )?,
+        };
         let _ = cloud.packed.set(f);
         Ok(cloud)
     }
@@ -522,6 +743,23 @@ fn scans_within<'de, D: serde::Deserializer<'de>>(
         }
     }
     d.deserialize_map(Scans { most, points })
+}
+
+/// The scan of the file at `path`, of `format` in units of `scale` mm, linked: its cache is built (every point of it, a
+/// piece at a time) unless the user's cache holds it already, built from the file as it is now.
+pub fn link(path: &std::path::Path, format: Format, scale: f64) -> Result<Cloud, String> {
+    let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = FileSource::open(&path)?;
+    let fingerprint = cache::fingerprint(&file, file.stamp(), format, scale)?;
+    let out = cache::path_of(fingerprint).ok_or("there's no folder to keep a scan's cache in")?;
+    let store = match cache::Store::open(&out, fingerprint) {
+        Ok(store) => store,
+        Err(_) => {
+            cache::build(&file, format, scale, fingerprint, &out)?;
+            cache::Store::open(&out, fingerprint)?
+        }
+    };
+    Cloud::linked(&path.to_string_lossy(), scale, store)
 }
 
 /// The points of a file of `format`, or what's wrong with it.

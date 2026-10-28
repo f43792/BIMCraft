@@ -126,12 +126,14 @@ pub static ALL: &[Command] = &[
         "point_cloud",
         "Point Cloud",
         &[],
-        "{path | cloud, name?, level?, at?: [x, y], offset?, angle?, units?, spacing?, origin?} brings in a laser scan (`path`: \
+        "{path | cloud, name?, level?, at?: [x, y], offset?, angle?, units?, spacing?, origin?, link?} brings in a laser scan (`path`: \
          PTS, XYZ, PLY, LAS or E57 (each of its scans placed by its pose), or a list of the files of one scan's stations, brought in as one; `units` of its coordinates mm, \
          cm, m (the default), in or ft; one point kept in each cube `spacing` mm wide) or places one the project holds again \
          (`cloud`, its name), as an element: its middle on `at` (the origin) and its foot on the level, or with `origin: file` \
-         where its file's coordinates put it; `offset` raises its middle over the level, `angle` turns it. Returns its id, the \
-         scan's name, the points kept and read, and where its middle was in the file",
+         where its file's coordinates put it; `offset` raises its middle over the level, `angle` turns it. `link` (one file, no \
+         `spacing`; the default for a file over 256 MB) keeps every point of it in the user's cache, built once, and the \
+         project only the upper levels of it, so a scan of any size is drawn in its detail. Returns its id, the scan's name, \
+         the points kept and read, whether it's linked, and where its middle was in the file",
         point_cloud,
     ),
     edit(
@@ -172,6 +174,15 @@ pub static ALL: &[Command] = &[
         "{id, at: [x, y], reach?} what of a CAD import lies nearest `at`, within `reach` mm (100 unless given): its kind, layer, \
          colour, linetype and weight, as Revit's Query",
         cad_query,
+    ),
+    edit(
+        "reload_cloud",
+        "Reload Point Cloud",
+        &[],
+        "{cloud} reads a linked scan (`cloud`, its name) again from its file: its cache is built again where the file has \
+         changed or this machine hasn't it, and every point cloud placing it shows it. Returns its points and whether the \
+         file had changed",
+        reload_cloud,
     ),
     edit(
         "wall",
@@ -2014,6 +2025,11 @@ fn with_links(s: &mut Session, mut reply: Value) -> Value {
     if !failed.is_empty() {
         reply["cads_not_reloaded"] = json!(failed);
     }
+    // A linked scan whose cache this machine hasn't is drawn by the levels the project keeps, until it's reloaded.
+    let missing: Vec<&String> = s.model.clouds.iter().filter(|(_, c)| !c.loaded()).map(|(n, _)| n).collect();
+    if !missing.is_empty() {
+        reply["clouds_not_loaded"] = json!(missing);
+    }
     reply
 }
 
@@ -3583,6 +3599,22 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
                 Some(u) => cloud::unit(&u).ok_or_else(|| bad(c, format!("`units` is one of mm, cm, m, in, ft, not {u}")))?,
             };
             let spacing = num(c, p, "spacing")?.unwrap_or(0.0);
+            let large = paths.len() == 1 && paths.iter().filter_map(|p| std::fs::metadata(p).ok()).any(|m| m.len() > cloud::LINK_ABOVE);
+            let link = match p.get("link") {
+                None | Some(Value::Null) => large && spacing == 0.0,
+                Some(Value::Bool(b)) => *b,
+                Some(v) => return Err(bad(c, format!("`link` is true or false, not {v}"))),
+            };
+            if link {
+                let ([path], [format]) = (paths.as_slice(), formats.as_slice()) else {
+                    return Err(bad(c, "a linked scan is one file: bring the files of several stations in held, without `link`"));
+                };
+                if spacing != 0.0 {
+                    return Err(bad(c, "a linked scan keeps every point of its file: give `spacing` only to one the project holds"));
+                }
+                let scan = cloud::link(path, *format, scale).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+                return place_cloud(s, p, level, name, scan, true);
+            }
             // What the project's other scans leave of what it may hold, shared among the files.
             let held: usize = m.clouds.values().map(Cloud::len).sum();
             let cap = cloud::MAX_CLOUD_POINTS.saturating_sub(held);
@@ -3605,6 +3637,13 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
             (name, scan.map_err(|e| bad(c, e))?, true)
         }
     };
+    place_cloud(s, p, level, name, scan, new)
+}
+
+/// `point_cloud`'s placing of `scan`, named `name`, on `level`; held by the project from now on where it's `new`.
+fn place_cloud(s: &mut Session, p: &Value, level: Guid, name: String, scan: Cloud, new: bool) -> R {
+    let c = "point_cloud";
+    let m = &s.model;
     let (lo, _) = scan.bounds();
     let origin = scan.origin();
     let (mut at, mut offset) = match string(c, p, "origin")?.as_deref() {
@@ -3635,13 +3674,30 @@ fn point_cloud(s: &mut Session, p: &Value) -> R {
         offset = o;
     }
     let angle = num(c, p, "angle")?.unwrap_or(0.0);
-    let (points, read) = (scan.len(), scan.read());
+    let (points, read, linked) = (scan.count(), scan.read(), scan.link().is_some());
     let m = s.model_mut();
     if new {
         m.clouds.insert(name.clone(), scan);
     }
     let id = m.insert(Element::PointCloud(PointCloud { cloud: name.clone(), level, at, offset, angle }));
-    Ok(json!({"id": id, "cloud": name, "points": points, "read": read, "origin": origin}))
+    Ok(json!({"id": id, "cloud": name, "points": points, "read": read, "linked": linked, "origin": origin}))
+}
+
+/// A linked scan read again from its file: its cache built again where the file has changed, or where this machine hasn't
+/// it, and the levels the project keeps of it with it.
+fn reload_cloud(s: &mut Session, p: &Value) -> R {
+    let c = "reload_cloud";
+    let name = string(c, p, "cloud")?.ok_or_else(|| bad(c, "`cloud` is required: the name of a linked scan"))?;
+    let old = s.model.clouds.get(&name).ok_or_else(|| bad(c, format!("the project holds no scan named `{name}`")))?;
+    let link = old.link().ok_or_else(|| bad(c, format!("`{name}` is held by the project, not linked: there's nothing to reload")))?;
+    let path = PathBuf::from(link.path());
+    let format = cloud::Format::from_extension(&ext(&path)).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+    let was = link.fingerprint();
+    let scan = cloud::link(&path, format, link.scale()).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+    let changed = scan.link().is_some_and(|l| l.fingerprint() != was);
+    let points = scan.count();
+    s.model_mut().clouds.insert(name.clone(), scan);
+    Ok(json!({"cloud": name, "points": points, "changed": changed}))
 }
 
 // ---------- CAD drawings ----------

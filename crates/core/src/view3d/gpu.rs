@@ -277,18 +277,15 @@ impl Mesh {
     pub fn node_points(&self, scan: usize, node: usize) -> Vec<PointVertex> {
         let Some(p) = self.scans.get(scan) else { return Vec::new() };
         let (cloud, grey) = (&p.scan.cloud, Rgb(crate::cloud::GREY, crate::cloud::GREY, crate::cloud::GREY));
-        let (points, colours) = (cloud.points(), cloud.colours());
         let word = |Rgb(r, g, b): Rgb| u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16;
-        cloud
-            .tree()
-            .points_of(node)
-            .iter()
-            .filter_map(|&i| {
-                let at = p.scan.place(*points.get(i as usize)?);
-                let base = colours.and_then(|c| c.get(i as usize)).map_or(grey, |c| Rgb(c[0], c[1], c[2]));
-                Some(PointVertex { position: sub(at, self.origin).map(|v| v as f32), color: word(p.tone.of(base)), owner: p.owner })
-            })
-            .collect()
+        let points = cloud.node(node);
+        let mut out = Vec::with_capacity(points.len());
+        points.each(|q, c| {
+            let at = p.scan.place(q);
+            let base = c.map_or(grey, |c| Rgb(c[0], c[1], c[2]));
+            out.push(PointVertex { position: sub(at, self.origin).map(|v| v as f32), color: word(p.tone.of(base)), owner: p.owner });
+        });
+        out
     }
 
     /// The nearest point of a scan drawn over the pixel whose centre is `(x, y)`, as the processor draws one: a square [`DOT`]
@@ -308,16 +305,14 @@ impl Mesh {
             if px + 1.0 < lo.0 - wide || px > hi.0 + wide || py + 1.0 < lo.1 - wide || py > hi.1 + wide {
                 continue;
             }
-            let points = p.scan.cloud.points();
-            for &i in tree.points_of(n) {
-                let Some(q) = points.get(i as usize) else { continue };
-                let (qx, qy, qz) = cam.project(p.scan.place(*q));
+            p.scan.cloud.node(n).each(|q, _| {
+                let (qx, qy, qz) = cam.project(p.scan.place(q));
                 let (x0, y0) = ((qx - half).round(), (qy - half).round());
                 let z = qz as f32;
                 if x0 <= px && px < x0 + wide && y0 <= py && py < y0 + wide && best.is_none_or(|(d, _)| z > d) {
                     best = Some((z, s));
                 }
-            }
+            });
         }
         best.and_then(|(z, s)| Some((z, Hit { id: self.scans.get(s)?.scan.owner, face: "" })))
     }

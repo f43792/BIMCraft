@@ -566,13 +566,16 @@ fn project_file(n: usize) -> Value {
 }
 
 #[test]
-fn a_file_of_format_4_that_holds_scans_opens_as_this_builds_format() {
-    // Builds before 5 saved scans as format 4 (PRs 61 to 72); those files open, and are this build's format once read.
+fn a_file_of_format_4_to_9_that_holds_scans_opens_as_this_builds_format() {
+    // Builds before 5 saved scans as format 4 (PRs 61 to 72), and builds before 10 held every scan; those files open, and are
+    // of this build's format once read.
     let mut file = project_file(2);
     assert_eq!(file["format"], crate::model::FORMAT);
-    file["format"] = json!(4);
-    let (m, left_out) = crate::model::Model::read(&file.to_string()).unwrap();
-    assert_eq!((m.format, m.clouds.len(), left_out.len()), (crate::model::FORMAT, 2, 0));
+    for old in 4..=9 {
+        file["format"] = json!(old);
+        let (m, left_out) = crate::model::Model::read(&file.to_string()).unwrap();
+        assert_eq!((m.format, m.clouds.len(), left_out.len()), (crate::model::FORMAT, 2, 0));
+    }
 }
 
 #[test]
@@ -629,4 +632,102 @@ fn a_scan_larger_than_a_picture_draws_shows_every_point_where_a_view_looks_close
     // Seen whole, the picture still draws no more than it may, the coarse levels of all of it.
     let fit = scene.render(&scene.fit(AZIMUTH, ELEVATION, 640, 480), &[]);
     assert!(pixels(&fit, blue) > 10_000 && pixels(&fit, red) > 0);
+}
+
+/// Linked scans keep their caches in a folder of the tests' own.
+fn cached() -> PathBuf {
+    static FOLDER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let folder = FOLDER.get_or_init(|| std::env::temp_dir().join(format!("bimcraft-scan-cache-{}", std::process::id()))).clone();
+    crate::cloud::cache::set_folder(Some(folder.clone()));
+    folder
+}
+
+/// A wall's face of 250 by 250 points 8 mm apart, in mm, red, lifted by `z` mm: more than one node of a tree holds.
+fn face(z: f64) -> String {
+    let mut text = String::new();
+    for i in 0..250 {
+        for k in 0..250 {
+            text += &format!("{} 0 {} 255 0 0\n", f64::from(i) * 8.0, f64::from(k) * 8.0 + z);
+        }
+    }
+    text
+}
+
+#[test]
+fn a_linked_scan_keeps_every_point_in_the_cache_is_saved_by_its_link_and_reloaded_when_its_file_changes() {
+    let folder = cached();
+    let path = scan("link", "face.xyz", &face(0.0));
+    let mut s = Session::new();
+    let r = run(&mut s, "point_cloud", json!({"path": path, "units": "mm", "link": true}));
+    assert_eq!((&r["linked"], &r["points"], &r["read"]), (&json!(true), &json!(62_500), &json!(62_500)), "{r}");
+    let cloud = s.model.clouds.get("face").unwrap().clone();
+    let link = cloud.link().unwrap();
+    let cache = folder.join(format!("{:016x}.bcoct", link.fingerprint()));
+    assert!(cache.is_file() && cloud.loaded());
+    assert!(std::path::Path::new(link.path()).is_absolute());
+    // The tree drawn from is the cache's, and holds every point once.
+    let tree = cloud.tree();
+    let all: usize = (0..tree.nodes().len()).map(|n| cloud.node(n).len()).sum();
+    assert!(tree.nodes().len() > 1 && all == 62_500, "{} nodes, {all} points", tree.nodes().len());
+    // Drawn as one held by the project is.
+    let mut held = Session::new();
+    run(&mut held, "point_cloud", json!({"path": path, "units": "mm", "link": false}));
+    let (a, b) = (Scene::new(&s.model), Scene::new(&held.model));
+    let cam = a.fit(AZIMUTH, ELEVATION, 320, 240);
+    assert_eq!(pixels(&a.render(&cam, &[]), red), pixels(&b.render(&cam, &[]), red));
+    assert!(pixels(&a.render(&cam, &[]), red) > 3000);
+    // A plan snaps to it as to one held.
+    let h = held.model.clouds.get("face").unwrap();
+    for at in [[3.0, 1.0], [997.5, -2.0], [1500.0, 0.0]] {
+        let (p, q) = (cloud.nearest(at, 20.0, (-1e6, 1e6)), h.nearest(at, 20.0, (-1e6, 1e6)));
+        let d = |p: Option<[f32; 3]>| p.map(|p| (f64::from(p[0]) - at[0]).hypot(f64::from(p[1]) - at[1]));
+        assert_eq!(d(p), d(q), "{at:?}");
+    }
+    // Saved, the project holds its link and the upper levels of its tree, and opens drawing from the cache.
+    let file = std::env::temp_dir().join(format!("bimcraft-cloud-{}-link.bimcraft", std::process::id()));
+    run(&mut s, "save", json!({"path": file}));
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved["format"], 6);
+    assert_eq!(saved["clouds"]["face"]["link"]["points"], 62_500);
+    let mut t = Session::new();
+    let opened = run(&mut t, "open", json!({"path": file}));
+    assert!(opened.get("clouds_not_loaded").is_none(), "{opened}");
+    assert_eq!(t.model.clouds.get("face"), Some(&cloud));
+    assert!(t.model.clouds.get("face").unwrap().loaded());
+    // Where the cache isn't, it opens drawn by what the project keeps, and says so; reloading builds it again.
+    std::fs::remove_file(&cache).unwrap();
+    let mut u = Session::new();
+    let opened = run(&mut u, "open", json!({"path": file}));
+    assert_eq!(opened["clouds_not_loaded"], json!(["face"]));
+    let c = Scene::new(&u.model);
+    assert!(pixels(&c.render(&cam, &[]), red) > 3000);
+    let r = run(&mut u, "reload_cloud", json!({"cloud": "face"}));
+    assert_eq!((&r["points"], &r["changed"]), (&json!(62_500), &json!(false)), "{r}");
+    assert!(cache.is_file() && u.model.clouds.get("face").unwrap().loaded());
+    run(&mut u, "undo", json!({}));
+    // Its file changed, a reload reads it as it is now.
+    std::fs::write(&path, face(0.0) + "4000 0 4000 255 0 0\n").unwrap();
+    let r = run(&mut u, "reload_cloud", json!({"cloud": "face"}));
+    assert_eq!((&r["points"], &r["changed"]), (&json!(62_501), &json!(true)), "{r}");
+    assert_eq!(u.model.clouds.get("face").unwrap().count(), 62_501);
+}
+
+#[test]
+fn a_scan_is_linked_alone_and_whole_and_only_a_linked_one_reloads() {
+    cached();
+    let path = scan("link-errors", "box.xyz", BOX);
+    let mut s = Session::new();
+    for (p, says) in [
+        (json!({"path": [path, path], "link": true}), "one file"),
+        (json!({"path": path, "link": true, "spacing": 10}), "every point"),
+        (json!({"path": path, "link": "yes"}), "true or false"),
+    ] {
+        let e = fails(&mut s, "point_cloud", p.clone());
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    // A small file is held unless it's asked to be linked.
+    assert_eq!(run(&mut s, "point_cloud", json!({"path": path}))["linked"], false);
+    assert!(fails(&mut s, "reload_cloud", json!({"cloud": "box"})).contains("not linked"));
+    assert!(fails(&mut s, "reload_cloud", json!({"cloud": "none"})).contains("no scan named"));
+    assert!(fails(&mut s, "reload_cloud", json!({})).contains("required"));
 }

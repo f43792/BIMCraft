@@ -5092,43 +5092,43 @@ fn a_file_from_before_guids_opens_with_guids_and_six_digit_ids() {
 }
 
 #[test]
-fn a_project_is_saved_as_format_9_and_one_of_format_4_to_8_opens_as_it_is_and_one_of_format_10_is_refused() {
+fn a_project_is_saved_as_format_10_and_one_of_format_4_to_9_opens_as_it_is_and_one_of_format_11_is_refused() {
     use crate::model::Model;
     // 5 added the scans a project holds and the point clouds that place them; 6 added detailing (lines, regions, groups,
-    // repeating details, line and fill styles); 7 its CAD drawings and the imports that place them; 8 text types. Nothing in a file of 4
-    // to 7 that holds no notes changes.
+    // repeating details, line and fill styles); 7 its CAD drawings and the imports that place them; 8 text types; 9 line
+    // patterns of graphic segments; 10 linked scans. Nothing in a file of 4 to 7 that holds no notes changes.
     let mut s = Session::new();
     let empty = serde_json::to_value(&*s.model).unwrap();
     house(&mut s);
     run(&mut s, "detail_line", json!({"start": [0, 0], "end": [1000, 0]}));
     let full = serde_json::to_value(&*s.model).unwrap();
     for v in [&empty, &full] {
-        assert_eq!(v["format"], 9, "a project is saved as format 9");
-        for old in [4, 5, 6, 7, 8] {
+        assert_eq!(v["format"], 10, "a project is saved as format 10");
+        for old in [4, 5, 6, 7, 8, 9] {
             let mut was = v.clone();
             was["format"] = json!(old);
             let (m, left_out) = Model::read(&was.to_string()).unwrap();
-            assert_eq!((m.format, left_out.len(), m.elements.len()), (9, 0, v["elements"].as_object().unwrap().len()));
+            assert_eq!((m.format, left_out.len(), m.elements.len()), (10, 0, v["elements"].as_object().unwrap().len()));
         }
     }
     assert!(full["elements"].as_object().unwrap().len() > 5);
     // A newer file says what it is and what to do, even when nothing else in it is wrong.
-    let mut nine = empty.clone();
-    nine["format"] = json!(10);
-    let e = Model::read(&nine.to_string()).unwrap_err();
+    let mut eleven = empty.clone();
+    eleven["format"] = json!(11);
+    let e = Model::read(&eleven.to_string()).unwrap_err();
     assert!(
-        e.contains("newer BIMCraft") && e.contains("file format 10") && e.contains("reads up to 9") && e.contains("update BIMCraft"),
+        e.contains("newer BIMCraft") && e.contains("file format 11") && e.contains("reads up to 10") && e.contains("update BIMCraft"),
         "{e}"
     );
     // A file of this format with a field it doesn't know is read without it, and says which.
     let mut odd = full.clone();
     odd["something_new"] = json!(true);
     let (m, left_out) = Model::read(&odd.to_string()).unwrap();
-    assert_eq!((m.format, left_out), (9, vec!["/something_new".to_string()]));
+    assert_eq!((m.format, left_out), (10, vec!["/something_new".to_string()]));
 }
 
 #[test]
-fn a_format_5_file_that_holds_elements_and_scans_migrates_to_9_and_keeps_both() {
+fn a_format_5_file_that_holds_elements_and_scans_migrates_to_10_and_keeps_both() {
     use crate::model::Model;
     let mut s = Session::new();
     house(&mut s);
@@ -5140,13 +5140,13 @@ fn a_format_5_file_that_holds_elements_and_scans_migrates_to_9_and_keeps_both() 
     let mut file: serde_json::Value = serde_json::from_str(&s.model.to_json().unwrap()).unwrap();
     file["format"] = json!(5);
     let (m, left_out) = Model::read(&file.to_string()).unwrap();
-    assert_eq!((m.format, m.clouds.len(), left_out.len(), m.elements.len()), (9, 1, 0, s.model.elements.len()));
-    // Written again, it says 9.
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&m.to_json().unwrap()).unwrap()["format"], 9);
-    // A file of 6 (detailing, no CAD drawings) opens as 9 likewise.
+    assert_eq!((m.format, m.clouds.len(), left_out.len(), m.elements.len()), (10, 1, 0, s.model.elements.len()));
+    // Written again, it says 10.
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&m.to_json().unwrap()).unwrap()["format"], 10);
+    // A file of 6 (detailing, no CAD drawings) opens as 10 likewise.
     file["format"] = json!(6);
     let (m, left_out) = Model::read(&file.to_string()).unwrap();
-    assert_eq!((m.format, left_out.len(), m.elements.len()), (9, 0, s.model.elements.len()));
+    assert_eq!((m.format, left_out.len(), m.elements.len()), (10, 0, s.model.elements.len()));
 }
 
 #[test]

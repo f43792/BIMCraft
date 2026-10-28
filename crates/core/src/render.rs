@@ -1415,22 +1415,22 @@ fn scans(d: &mut Drawing, m: &Model, range: &PlanRange, look: &Look) {
     let grey = Rgb(crate::cloud::GREY, crate::cloud::GREY, crate::cloud::GREY);
     for ((id, pc, cloud), nodes) in placed.iter().copied().zip(chosen) {
         let place = m.cloud_place(pc);
-        let (tree, points, colours) = (cloud.tree(), cloud.points(), cloud.colours());
         // Each point it sees: its dot's corner, px, its height and its colour.
         let mut seen: Vec<(i64, i64, f64, Rgb)> = Vec::new();
-        for i in nodes.into_iter().flat_map(|node| tree.points_of(node)).map(|&i| i as usize) {
-            let Some(p) = points.get(i) else { continue };
-            let [x, y, z] = place(*p);
-            if !(range.depth - TOL..=range.cut).contains(&z) {
-                continue;
-            }
-            let (px, py) = d.view.px(P2(x, y));
-            let (x0, y0) = ((f64::from(px) - half).round(), (f64::from(py) - half).round());
-            if !(x0 > -(dot as f64) && y0 > -(dot as f64) && x0 < w as f64 && y0 < h as f64) {
-                continue;
-            }
-            let base = colours.and_then(|c| c.get(i)).map_or(grey, |c| Rgb(c[0], c[1], c[2]));
-            seen.push((x0 as i64, y0 as i64, z, look.surface(id, base)));
+        for node in nodes {
+            cloud.node(node).each(|p, c| {
+                let [x, y, z] = place(p);
+                if !(range.depth - TOL..=range.cut).contains(&z) {
+                    return;
+                }
+                let (px, py) = d.view.px(P2(x, y));
+                let (x0, y0) = ((f64::from(px) - half).round(), (f64::from(py) - half).round());
+                if !(x0 > -(dot as f64) && y0 > -(dot as f64) && x0 < w as f64 && y0 < h as f64) {
+                    return;
+                }
+                let base = c.map_or(grey, |c| Rgb(c[0], c[1], c[2]));
+                seen.push((x0 as i64, y0 as i64, z, look.surface(id, base)));
+            });
         }
         let Some((lo, hi)) = seen.iter().fold(None, |b: Option<((i64, i64), (i64, i64))>, &(x, y, ..)| {
             let ((x0, y0), (x1, y1)) = b.unwrap_or(((x, y), (x, y)));
