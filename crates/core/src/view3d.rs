@@ -799,6 +799,7 @@ pub struct Scene {
 }
 
 /// A scan as a point cloud places it: the model's cloud (its points shared), and where they go.
+#[derive(Clone)]
 struct Scan {
     owner: Id,
     cloud: crate::cloud::Cloud,
@@ -857,7 +858,22 @@ impl Scan {
 pub const DRAWN: usize = 2_000_000;
 
 /// How wide a point is drawn, px.
-pub(crate) const DOT: usize = 2;
+pub const DOT: usize = 2;
+
+/// The fewest and the most points a picture may be given to draw ([`set_drawn`]).
+pub const DRAWN_RANGE: (usize, usize) = (100_000, 20_000_000);
+
+static BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(DRAWN);
+
+/// The points a picture draws among its scans, [`DRAWN`] unless the program says otherwise: the desktop's Settings > Graphics.
+pub fn drawn() -> usize {
+    BUDGET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Every picture from now on draws up to `n` points among its scans, within [`DRAWN_RANGE`].
+pub fn set_drawn(n: usize) {
+    BUDGET.store(n.clamp(DRAWN_RANGE.0, DRAWN_RANGE.1), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// How an element's triangles name their faces.
 enum Rule {
@@ -1300,7 +1316,7 @@ impl Scene {
         let mut dots = vec![PAPER; w * h];
         // The nodes of each scan the picture draws: the largest first, as many as its budget holds.
         let trees: Vec<&Octree> = kept.iter().map(|(_, s)| s.cloud.tree()).collect();
-        let chosen = select(&trees, DRAWN, |t, node| kept.get(t)?.1.seen(node, cam, clip, cut, (w, h)));
+        let chosen = select(&trees, drawn(), |t, node| kept.get(t)?.1.seen(node, cam, clip, cut, (w, h)));
         let grey = Rgb(crate::cloud::GREY, crate::cloud::GREY, crate::cloud::GREY);
         let half = DOT as f64 / 2.0;
         for (&(n, scan), nodes) in kept.iter().zip(chosen) {

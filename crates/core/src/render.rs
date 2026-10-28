@@ -1380,7 +1380,7 @@ pub fn draw_at(m: &Model, level: impl Key, view: View, k: f32) -> Drawing {
 
 /// The points of the scans a plan sees, from its cut plane down to its view depth, as Revit draws a point cloud in plan: from
 /// above, each a dot [`view3d::DOT`] pixels wide in its colour (or the view's), the highest at each pixel on top, no more than
-/// [`view3d::DRAWN`] of them among the scans: the levels of detail of each the plan sees largest
+/// [`view3d::drawn`] of them among the scans: the levels of detail of each the plan sees largest
 /// ([`crate::cloud::octree::select`]), and none it doesn't see. Each scan is one picture, no bigger than its dots and clear where it has none, so
 /// it picks where its points are.
 fn scans(d: &mut Drawing, m: &Model, range: &PlanRange, look: &Look) {
@@ -1397,7 +1397,7 @@ fn scans(d: &mut Drawing, m: &Model, range: &PlanRange, look: &Look) {
     // The nodes of each scan the plan draws: those its range and its edges see, the largest first, as many as its budget holds.
     let view = d.view;
     let trees: Vec<&crate::cloud::octree::Octree> = placed.iter().map(|(_, _, c)| c.tree()).collect();
-    let chosen = crate::cloud::octree::select(&trees, view3d::DRAWN, |t, node| {
+    let chosen = crate::cloud::octree::select(&trees, view3d::drawn(), |t, node| {
         let place = m.cloud_place(placed.get(t)?.1);
         let corners = node.corners().map(|c| place(c.map(|v| v as f32)));
         let (lo, hi) = corners.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), c| (lo.min(c[2]), hi.max(c[2])));

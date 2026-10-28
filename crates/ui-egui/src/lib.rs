@@ -430,6 +430,8 @@ pub struct BimApp {
     ribbon_peek: bool,
     /// What High Contrast Point Clouds fills a view's scans with: the user's (Settings > Graphics), crimson at first.
     scan_contrast: [u8; 3],
+    /// The most points a view draws among its scans: the user's (Settings > Graphics), `view3d::DRAWN` at first.
+    point_budget: usize,
     ribbon_bottom: Pos2,
     /// The Compact layout (File > Settings): the bars and palettes flush to the edges, not floating cards.
     compact: bool,
@@ -931,6 +933,7 @@ impl BimApp {
             compact: false,
             ribbon_peek: false,
             scan_contrast: footer::HIGH_CONTRAST,
+            point_budget: bimcraft_core::view3d::DRAWN,
             ribbon_bottom: Pos2::ZERO,
             settings_page: None,
             settings_path: None,
@@ -2465,6 +2468,7 @@ impl BimApp {
         fresh.compact = self.compact;
         fresh.font_finder = self.font_finder;
         fresh.scan_contrast = self.scan_contrast;
+        fresh.point_budget = self.point_budget;
         fresh.light_canvas = self.light_canvas;
         fresh.styled = self.styled;
         fresh.theme_wanted = self.theme_wanted.take();

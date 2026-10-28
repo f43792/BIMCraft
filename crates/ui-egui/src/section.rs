@@ -18,9 +18,9 @@ use crate::orbit::{rgb, scene_of};
 use crate::style::canvas_pal;
 use crate::{BimApp, Status, Tool};
 
-/// What a picture is of: the model, the view, its framing in pixels, the elements tinted, and
-/// whether it's drawn dark.
-type Shot = (Arc<Model>, Id, View, Vec<(Id, Rgb)>, bool);
+/// What a picture is of: the model, the view, its framing in pixels, the elements tinted, whether it's
+/// drawn dark, and how many points a view draws of a scan.
+type Shot = (Arc<Model>, Id, View, Vec<(Id, Rgb)>, bool, usize);
 
 /// The section or elevation on screen, between frames: its picture, and its texture.
 #[derive(Default)]
@@ -53,7 +53,7 @@ impl Cut {
             }
             self.image = Some(image);
         }
-        self.shown = Some((Arc::clone(model), id, pixels, tints, dark));
+        self.shown = Some((Arc::clone(model), id, pixels, tints, dark, bimcraft_core::view3d::drawn()));
     }
 }
 
@@ -74,7 +74,7 @@ impl BimApp {
         // The picture on screen is this model's, in this view and size (and, tints given, tinted so): a pan or a zoom, a new
         // model or another tab is not. A picture costs a frame, and the drawing over it keeps its regions' ink from it: so it is
         // drawn first and once, with the tints it had, and again only if the hover changed along with the view.
-        let current = |cut: &Cut, tints: Option<&[(Id, Rgb)]>| matches!(&cut.shown, Some((m, v, f, t, k)) if Arc::ptr_eq(m, &model) && *v == id && *f == pixels && *k == dark && tints.is_none_or(|x| x == t));
+        let current = |cut: &Cut, tints: Option<&[(Id, Rgb)]>| matches!(&cut.shown, Some((m, v, f, t, k, n)) if Arc::ptr_eq(m, &model) && *v == id && *f == pixels && *k == dark && *n == bimcraft_core::view3d::drawn() && tints.is_none_or(|x| x == t));
         if !current(&self.cut, None) {
             let tints = self.cut.shown.as_ref().map(|s| s.3.clone()).unwrap_or_default();
             self.cut.draw(ui.ctx(), &model, scene_of(&mut self.orbit.scene, &model), id, pixels, tints, dark);

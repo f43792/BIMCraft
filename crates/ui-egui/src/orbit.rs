@@ -25,9 +25,9 @@ use crate::icons::Icon;
 use crate::style::{canvas_pal, pal};
 use crate::{BimApp, Status, Tool, icon_button};
 
-/// What a picture is of: the model, the camera, the elements tinted, whether the theme is dark, whether the card drew it, and
-/// the section box it is cut to while one is dragged.
-type Shot = (Arc<Model>, Camera, Vec<(Id, Rgb)>, bool, bool, Option<(P3, P3)>);
+/// What a picture is of: the model, the camera, the elements tinted, whether the theme is dark, whether the card drew it, the
+/// section box it is cut to while one is dragged, and the points it draws among the scans.
+type Shot = (Arc<Model>, Camera, Vec<(Id, Rgb)>, bool, bool, Option<(P3, P3)>, usize);
 
 /// A model's mesh for the card, or why the card can't draw it.
 type Meshed = (Arc<Model>, Result<Arc<Mesh>, String>);
@@ -294,15 +294,21 @@ impl BimApp {
             .chain(hovered.filter(|id| !selection.contains(id)).map(|id| (id, rgb(canvas_pal().hover))))
             .collect();
         let dark = crate::style::canvas_dark();
-        if !matches!(&o.shown, Some((m, c, t, k, g, b)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark && *g == mesh.is_some() && *b == reboxed)
+        let points = bimcraft_core::view3d::drawn();
+        if !matches!(&o.shown, Some((m, c, t, k, g, b, n)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark && *g == mesh.is_some() && *b == reboxed && *n == points)
         {
             // The card's picture, if it makes one; the processor's if not, and if the card fails it for good.
-            let mut drawn = false;
+            let (mut drawn, mut complete) = (false, true);
             if let (Some(mesh), Some(gpu)) = (&mesh, self.card.gpu.as_mut()) {
                 match gpu.draw(mesh, &cam, &tints, rgb(color(render::PAPER))) {
-                    Ok(()) => {
+                    Ok(whole) => {
                         o.picker = Some(Picker::Mesh(Arc::clone(mesh), tints.clone()));
                         drawn = true;
+                        // A scan's points still going up: drawn again next frame, with more of them.
+                        if !whole {
+                            ui.ctx().request_repaint();
+                        }
+                        complete = whole;
                     }
                     Err(e) => {
                         self.status = crate::updates::failed(crate::lang::tf(
@@ -339,7 +345,7 @@ impl BimApp {
                 }
                 o.picker = Some(Picker::Image(image));
             }
-            o.shown = Some((Arc::clone(&model), cam, tints, dark, drawn, reboxed));
+            o.shown = complete.then(|| (Arc::clone(&model), cam, tints, dark, drawn, reboxed, points));
         }
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, color(render::PAPER));

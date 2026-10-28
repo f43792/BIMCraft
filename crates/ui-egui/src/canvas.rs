@@ -66,20 +66,23 @@ pub(crate) struct PlanCache {
     pub(crate) pictures: Option<(Weak<Drawing>, Vec<TextureHandle>)>,
 }
 
-type PlanShot = (Weak<Model>, Id, View, bool, Arc<Drawing>);
+/// The model, the plan, its framing, whether it's the ceiling plan, the points a picture draws (`view3d::drawn`), and the drawing.
+type PlanShot = (Weak<Model>, Id, View, bool, usize, Arc<Drawing>);
 
 impl PlanCache {
     pub(crate) fn drawing(&mut self, model: &Arc<Model>, level: Id, view: View, ceiling: bool) -> Arc<Drawing> {
-        if let Some((m, id, v, up, drawing)) = &self.shown
+        let points = bimcraft_core::view3d::drawn();
+        if let Some((m, id, v, up, n, drawing)) = &self.shown
             && m.ptr_eq(&Arc::downgrade(model))
             && *id == level
             && *v == view
             && *up == ceiling
+            && *n == points
         {
             return Arc::clone(drawing);
         }
         let drawing = Arc::new(if ceiling { render::draw_ceiling(model, level, view) } else { render::draw(model, level, view) });
-        self.shown = Some((Arc::downgrade(model), level, view, ceiling, Arc::clone(&drawing)));
+        self.shown = Some((Arc::downgrade(model), level, view, ceiling, points, Arc::clone(&drawing)));
         drawing
     }
 

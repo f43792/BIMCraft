@@ -1,17 +1,19 @@
 //! The 3D view drawn on the graphics card: the core's `view3d::gpu::Mesh` uploaded once for a model, and the passes for each
 //! picture (the opaque surfaces; those seen through; edges, ground and the blend; the levels' lines), in `gpu.wgsl`, into a
 //! texture that egui shows as it shows the CPU picture. What changes between pictures is small: the camera, the levels' lines,
-//! and, only when they change, the selection's tints and the textures' mip levels. Opt-in (Settings > Performance); what the
+//! and, only when they change, the selection's tints and the textures' mip levels. A scan's points go up by node, as the camera
+//! chooses them (`Mesh::chosen`): no more than [`UPLOAD`] points a picture, the rest in the pictures after it, and the nodes
+//! no picture has drawn for longest are let go past [`KEPT`] times the points a picture draws. Opt-in (Settings > Performance); what the
 //! card can't draw (hidden line, wireframe) is the processor's, and so is everything when the card fails: a validation or out-of-memory error from the device is caught
 //! here, not left to the device's handler, and the window carries on without the card (`BimApp::gpu_failed`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use bimcraft_core::model::Id;
 use bimcraft_core::render::Rgb;
-use bimcraft_core::view3d::gpu::{Mesh, Vertex};
-use bimcraft_core::view3d::{Camera, MAX_SIDE};
+use bimcraft_core::view3d::gpu::{Mesh, PointVertex, Vertex};
+use bimcraft_core::view3d::{Camera, DOT, MAX_SIDE, drawn};
 use eframe::egui_wgpu::{RenderState, wgpu};
 use egui::TextureId;
 
@@ -29,6 +31,12 @@ const GLOBALS: u64 = 7 * 16;
 const OWNER: u64 = 32;
 const SKIN: u64 = 48;
 const SEGMENT: u64 = 48;
+/// A scan's point (see [`PointVertex`]): its position as three floats, its colour and its owner.
+const POINT_STRIDE: u64 = 20;
+/// The most points a picture puts on the card: a node over it still goes, alone.
+const UPLOAD: usize = 1_000_000;
+/// How many times the points a picture draws the card keeps.
+const KEPT: usize = 3;
 
 /// The window's use of the card: whether the user asked for it, the wgpu state it would be made on (none where the window has
 /// no wgpu device, as in every test), the card once it's made, and why the last picture was drawn on the processor, if it was.
@@ -109,6 +117,11 @@ struct Uploaded {
     lookups: Vec<[u32; 12]>,
     /// The buffers bound, made again when the segments' buffer is.
     bind: Option<wgpu::BindGroup>,
+    /// The scans' nodes on the card, by scan and node: their points, how many, and the picture that last drew them.
+    nodes: HashMap<(usize, usize), (wgpu::Buffer, u32, u64)>,
+    /// Pictures drawn of the mesh, and the points of all the nodes on the card.
+    frame: u64,
+    resident: usize,
 }
 
 /// The card, and what it keeps between pictures.
@@ -118,6 +131,7 @@ pub struct Gpu {
     state: Option<RenderState>,
     scene: wgpu::RenderPipeline,
     clear: wgpu::RenderPipeline,
+    points: wgpu::RenderPipeline,
     post: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     group0: wgpu::BindGroupLayout,
@@ -297,6 +311,21 @@ impl Gpu {
             &[target(COLOR), target(CLEAR_IDS)],
             true,
         );
+        let point_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Uint32];
+        let point_layout = wgpu::VertexBufferLayout {
+            array_stride: POINT_STRIDE,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &point_attributes,
+        };
+        let points = pipeline(
+            "bimcraft-3d-points",
+            &surface_layout,
+            "vs_point",
+            "fs_point",
+            &[Some(point_layout)],
+            &[target(COLOR), target(IDS)],
+            true,
+        );
         let post = pipeline("bimcraft-3d-post", &picture_layout, "vs_full", "fs_post", &[], &[target(COLOR)], false);
         let lines = pipeline("bimcraft-3d-lines", &targets_layout, "vs_line", "fs_line", &[], &[target(COLOR)], false);
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -313,6 +342,7 @@ impl Gpu {
             state: None,
             scene,
             clear,
+            points,
             post,
             lines,
             group0,
@@ -359,18 +389,19 @@ impl Gpu {
     }
 
     /// Draws `mesh` as `cam` sees it, `tints` colouring (halfway, and the edges whole) what they name, on `ground` where nothing is.
-    /// The picture is in [`texture`](Self::texture). An error leaves the card with nothing kept: the caller does without it.
-    pub fn draw(&mut self, mesh: &Arc<Mesh>, cam: &Camera, tints: &[(Id, Rgb)], ground: Rgb) -> Result<(), String> {
+    /// The picture is in [`texture`](Self::texture); it is whole unless this says it isn't (the scans' points not all on the card
+    /// yet: drawing it again brings more). An error leaves the card with nothing kept: the caller does without it.
+    pub fn draw(&mut self, mesh: &Arc<Mesh>, cam: &Camera, tints: &[(Id, Rgb)], ground: Rgb) -> Result<bool, String> {
         let guard = scopes(&self.device);
         let drawn = self.encode(mesh, cam, tints, ground);
         let caught = caught(guard);
         if drawn.is_err() || caught.is_err() {
             (self.mesh, self.targets) = (None, None);
         }
-        drawn.and(caught)
+        caught.and(drawn)
     }
 
-    fn encode(&mut self, mesh: &Arc<Mesh>, cam: &Camera, tints: &[(Id, Rgb)], ground: Rgb) -> Result<(), String> {
+    fn encode(&mut self, mesh: &Arc<Mesh>, cam: &Camera, tints: &[(Id, Rgb)], ground: Rgb) -> Result<bool, String> {
         let (w, h) = (cam.width.clamp(1, MAX_SIDE), cam.height.clamp(1, MAX_SIDE));
         if w.max(h) > self.device.limits().max_texture_dimension_2d {
             return Err("the picture is bigger than the card draws".into());
@@ -384,6 +415,53 @@ impl Gpu {
             }
         };
         let (Some(up), Some(targets)) = (&mut self.mesh, &self.targets) else { return Err("nothing to draw on".into()) };
+        // The scans' nodes this picture draws: those not on the card go up, a picture's share at a time.
+        up.frame += 1;
+        let chosen = mesh.chosen(cam);
+        let (mut sent, mut whole) = (0_usize, true);
+        for &key in &chosen {
+            if let Some(node) = up.nodes.get_mut(&key) {
+                node.2 = up.frame;
+                continue;
+            }
+            if sent >= UPLOAD {
+                whole = false;
+                continue;
+            }
+            let points = mesh.node_points(key.0, key.1);
+            let size = points.len() as u64 * POINT_STRIDE;
+            if points.is_empty() || size > device.limits().max_buffer_size {
+                continue;
+            }
+            let mut bytes = Words::with_capacity(size as usize);
+            for PointVertex { position, color, owner } in &points {
+                put(&mut bytes, position);
+                put_words(&mut bytes, &[*color, *owner]);
+            }
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bimcraft-3d-points"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            write(&buffer, &bytes);
+            sent += points.len();
+            up.resident += points.len();
+            up.nodes.insert(key, (buffer, points.len() as u32, up.frame));
+        }
+        // Past what the card keeps, the nodes drawn longest ago go.
+        if up.resident > KEPT * drawn() {
+            let mut old: Vec<((usize, usize), u64)> = up.nodes.iter().filter(|(_, n)| n.2 < up.frame).map(|(k, n)| (*k, n.2)).collect();
+            old.sort_by_key(|(k, frame)| (*frame, *k));
+            for (key, _) in old {
+                if up.resident <= KEPT * drawn() {
+                    break;
+                }
+                if let Some((_, count, _)) = up.nodes.remove(&key) {
+                    up.resident -= count as usize;
+                }
+            }
+        }
         // Each owner's edge, how much of it shows, and its tint: written again only when the tints change.
         if up.tints.as_deref() != Some(tints) {
             let tinted: BTreeMap<Id, Rgb> = tints.iter().copied().collect();
@@ -434,7 +512,7 @@ impl Gpu {
         put(&mut globals, &[view.back[0], view.back[1], view.back[2], 0.5 / view.depth]);
         put(&mut globals, &[view.target[0], view.target[1], view.target[2], view.scale]);
         put(&mut globals, &[mesh.origin[0] as f32, mesh.origin[1] as f32, mesh.origin[2] as f32, 0.0]);
-        put(&mut globals, &[rgb(ground)[0], rgb(ground)[1], rgb(ground)[2], 0.0]);
+        put(&mut globals, &[rgb(ground)[0], rgb(ground)[1], rgb(ground)[2], DOT as f32]);
         // 1.5 px, as the processor lets a line show through a surface that near.
         put(&mut globals, &[width, height, 1.5 / view.scale * 0.5 / view.depth, if through { 1.0 } else { 0.0 }]);
         write(&self.globals, &globals);
@@ -497,6 +575,15 @@ impl Gpu {
                 pass.set_vertex_buffer(0, up.vertices.slice(..));
                 pass.draw(vertices, 0..1);
             }
+            // The scans' points after the opaque surfaces, as the processor draws them, each a square of two triangles.
+            if !through_pass && !chosen.is_empty() {
+                pass.set_pipeline(&self.points);
+                pass.set_bind_group(0, &*bind, &[]);
+                for (buffer, count, _) in chosen.iter().filter_map(|key| up.nodes.get(key)) {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..*count);
+                }
+            }
         }
         for (name, pipeline, load, instances) in
             [("edges", &self.post, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 1), ("levels", &self.lines, wgpu::LoadOp::Load, count)]
@@ -527,7 +614,7 @@ impl Gpu {
             pass.draw(0..if name == "edges" { 3 } else { 6 }, 0..instances);
         }
         self.queue.submit([encoder.finish()]);
-        Ok(())
+        Ok(whole)
     }
 
     /// Puts `mesh` on the card, unless it's there already.
@@ -568,6 +655,9 @@ impl Gpu {
             owners: Gpu::storage(&self.device, mesh.owners.len().max(1) as u64 * OWNER),
             skins: Gpu::storage(&self.device, mesh.skins.len().max(1) as u64 * SKIN),
             texels,
+            nodes: HashMap::new(),
+            frame: 0,
+            resident: 0,
         });
         Ok(())
     }
@@ -693,7 +783,9 @@ mod tests {
         let mesh = Arc::new(Mesh::new(&scene, &look).unwrap());
         let cam = scene.fit_in(AZIMUTH, ELEVATION, 640, 480, &look);
         let cpu = scene.render_in(&cam, tints, &look);
-        gpu.draw(&mesh, &cam, tints, PAPER).unwrap();
+        // A scan's points go up a frame's share at a time: drawn again until they're all there.
+        let frames = (0..100).take_while(|_| !gpu.draw(&mesh, &cam, tints, PAPER).unwrap()).count();
+        assert!(frames < 100, "the card never had all the points it was given");
         let pixels = read(gpu);
         assert_eq!(pixels.len(), cpu.rgba.len());
         let far = |a: &[u8], b: &[u8]| a[..3].iter().zip(&b[..3]).any(|(x, y)| x.abs_diff(*y) > 6);
@@ -749,6 +841,39 @@ mod tests {
         draws_as_the_processor(&mut gpu, &s, &[]);
     }
 
+    /// The sample house and a scan beside it: a sheet 4 m wide and 3 m high standing on the level, its colours a gradient.
+    fn scanned() -> Session {
+        let mut s = sample();
+        let mut text = String::new();
+        for i in 0..=200 {
+            for k in 0..=150 {
+                text += &format!("{} -6 {} {} {} 90\n", f64::from(i) * 0.02, f64::from(k) * 0.02, i, k);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("bimcraft-gpu-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sheet.xyz");
+        std::fs::write(&path, text).unwrap();
+        s.execute("point_cloud", &serde_json::json!({"path": path, "at": [2000, -6000]})).unwrap();
+        s
+    }
+
+    #[test]
+    fn the_card_draws_a_scan_as_the_processor_does() {
+        let Some(mut gpu) = headless() else {
+            eprintln!("no graphics adapter here: the card's picture is not compared");
+            return;
+        };
+        let s = scanned();
+        let id = *s.model.elements.iter().find(|(_, e)| e.category() == "pointcloud").unwrap().0;
+        let scene = Scene::new(&s.model);
+        let look = Look::of_3d(&s.model);
+        assert!(scene.render_in(&scene.fit_in(AZIMUTH, ELEVATION, 640, 480, &look), &[], &look).shows().contains(&id));
+        draws_as_the_processor(&mut gpu, &s, &[]);
+        // Selected, it is tinted as the processor tints it.
+        draws_as_the_processor(&mut gpu, &s, &[(id, Rgb(0, 120, 215))]);
+    }
+
     #[test]
     fn a_model_with_nothing_to_draw_draws_the_ground() {
         let Some(mut gpu) = headless() else { return };
@@ -756,7 +881,7 @@ mod tests {
         let (scene, look) = (Scene::new(&s.model), Look::of_3d(&s.model));
         let mesh = Arc::new(Mesh::new(&scene, &look).unwrap());
         let cam = scene.fit_in(AZIMUTH, ELEVATION, 64, 48, &look);
-        gpu.draw(&mesh, &cam, &[], Rgb(10, 20, 30)).unwrap();
+        assert!(gpu.draw(&mesh, &cam, &[], Rgb(10, 20, 30)).unwrap());
         let pixels = read(&gpu);
         // Nothing but the ground, and the new project's level lines over it.
         let ground = pixels.as_chunks::<4>().0.iter().filter(|p| **p == [10, 20, 30, 255]).count();

@@ -58,8 +58,8 @@ or the colour the view's projection fill gives. A picture draws at most `DRAWN` 
 level of detail (below). The view fits round its scans, and a level's plane reaches past them (`Model::model_extent`).
 A 3D view's section box keeps a scan's points inside it and no others, so its floors and ceilings can be cut away to show the walls to
 model against ([views and graphics](views-and-graphics.md)); in a plan the view range does it, or the box itself when the plan follows it. Views hide and override point clouds by element or by the category `pointcloud` (`graphics::SCANS`, apart from `MODEL`:
-Revit has a tab of its own for them in Visibility/Graphics, and Object Styles no row). The graphics card doesn't draw them
-yet: `gpu::Mesh::new` refuses a view that shows one, and the processor draws it. The wireframe style leaves them out.
+Revit has a tab of its own for them in Visibility/Graphics, and Object Styles no row). The graphics card draws them as the
+processor does (below). The wireframe style leaves them out.
 
 A section's or an elevation's picture is the same rasteriser with a `Clip`, and `Scene::dots` keeps a point as `raster` keeps a
 pixel: between the line and the far clip, inside the crop. A plan draws what its view range sees, from the cut plane down to
@@ -116,4 +116,17 @@ looks into a node only while its squares are drawn a pixel or wider (`FINEST`), 
 sections leave out nodes past the picture's edges, outside the section box or a section's clip (`Scan::seen`); a plan, those
 outside its view range or its edges. So a view zoomed in on part of a scan of many millions draws every point it sees, and one
 of all of it draws its coarse levels. A project's scans hold up to `MAX_CLOUD_POINTS` (30 million) among them; past it, the file
-is thinned as above. Snapping still looks through the `Grid`.
+is thinned as above. Snapping still looks through the `Grid`. How many points a picture draws is the user's: Settings >
+Graphics' Points drawn (`point_budget` in `settings.json`, 0.1 to 20 million, `view3d::DRAWN_RANGE`), which the desktop gives
+the core (`view3d::set_drawn`) for every picture after; a view's cached picture is drawn again when it changes.
+
+## On the graphics card
+
+`gpu::Mesh` holds the scans a 3D view shows, coloured as the view colours them (`graphics::Tone`), their elements among its
+owners. `Mesh::chosen` is the processor's choice of nodes for a camera, and `Mesh::node_points` a node's points for the card,
+from the mesh's origin. The desktop (`gpu.rs`) puts a node on the card the first time a picture chooses it, no more than
+`UPLOAD` points a picture (a picture that is short of some says so, and the 3D view draws again the next frame), keeps up to
+`KEPT` times the budget, and lets go first of the nodes drawn longest ago. In the opaque pass, after the surfaces, each point is
+a square `DOT` pixels wide (`vs_point`, two triangles an instance), its corner rounded as the processor rounds it, unlit, with
+depth; its pixels' plane is `POINT`, so `fs_post` draws no edge round it and tints it as the processor does. Picking through the
+mesh finds the nearest point drawn over a pixel (`Mesh::nearest_point`) as the processor's picture would.

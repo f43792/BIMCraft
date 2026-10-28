@@ -747,6 +747,21 @@ pub fn graphics_of(m: &Model, view: impl Key) -> Option<&Graphics> {
     graphics_of_element(m.elements.get(m.plan_source(view))?)
 }
 
+/// How a 3D view colours an element's surfaces: in a fill of the view's own or their own colours, halftoned or not.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tone {
+    fill: Option<Rgb>,
+    halftone: bool,
+}
+
+impl Tone {
+    /// The colour a surface `base` is shown in.
+    pub fn of(&self, base: Rgb) -> Rgb {
+        let c = self.fill.unwrap_or(base);
+        if self.halftone { halftone(c) } else { c }
+    }
+}
+
 /// What a view's graphics come to for each element of the model.
 #[derive(Default)]
 pub struct Look {
@@ -898,9 +913,14 @@ impl Look {
 
     /// The colour a 3D view shades element `id` in, `base` unless it says otherwise.
     pub fn surface(&self, id: Id, base: Rgb) -> Rgb {
-        let Some(o) = self.paint.get(&id) else { return base };
-        let c = o.projection.fill.map_or(base, |[r, g, b]| Rgb(r, g, b));
-        if o.halftone { halftone(c) } else { c }
+        self.tone(id).of(base)
+    }
+
+    /// How the 3D view colours element `id`'s surfaces, to keep: [`Look::surface`] is its [`Tone::of`].
+    pub fn tone(&self, id: Id) -> Tone {
+        self.paint
+            .get(&id)
+            .map_or_else(Tone::default, |o| Tone { fill: o.projection.fill.map(|[r, g, b]| Rgb(r, g, b)), halftone: o.halftone })
     }
 
     /// Whether the view fills element `id`'s surfaces with a colour of its own (its projection's fill), whatever theirs are.

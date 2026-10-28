@@ -349,14 +349,42 @@ fn what_is_nearer_hides_a_scan_and_a_scan_hides_what_is_behind_it() {
 }
 
 #[test]
-fn the_graphics_card_leaves_a_view_with_a_scan_to_the_processor() {
+fn the_graphics_cards_mesh_holds_a_scan_and_picks_its_points_as_the_picture_does() {
     let mut s = Session::new();
-    let id = run(&mut s, "point_cloud", json!({"path": scan("gpu", "box.xyz", BOX)}))["id"].as_u64().unwrap();
-    run(&mut s, "wall", json!({"points": [[0, 0], [3000, 0]]}));
-    let err = gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).err().unwrap();
-    assert!(err.contains("point cloud"), "{err}");
+    let id = run(&mut s, "point_cloud", json!({"path": scan("gpu", "sheet.xyz", &sheet(Some([255, 0, 0])))}))["id"].as_u64().unwrap();
+    // A wall in front of part of it.
+    run(&mut s, "wall", json!({"points": [[-500, -1000], [600, -1000]], "height": 1200}));
+    let (scene, look) = (Scene::new(&s.model), Look::of_3d(&s.model));
+    let mesh = gpu::Mesh::new(&scene, &look).unwrap();
+    let cam = scene.fit_in(AZIMUTH, ELEVATION, 320, 240, &look);
+    // The nodes it draws are the processor's, each point the scan's colour, owned by its element.
+    let chosen = mesh.chosen(&cam);
+    assert!(!chosen.is_empty());
+    let points: Vec<gpu::PointVertex> = chosen.iter().flat_map(|&(scan, node)| mesh.node_points(scan, node)).collect();
+    assert_eq!(points.len(), 101 * 101);
+    assert!(points.iter().all(|p| p.color == 0x0000ff && mesh.owners[p.owner as usize - 1].id == id));
+    // Picked where the picture shows it, the wall where the wall hides it.
+    let image = scene.render_in(&cam, &[], &look);
+    let (mut agree, mut total, mut on_scan) = (0, 0, 0);
+    for y in 0..240 {
+        for x in 0..320 {
+            let (x, y) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let cpu = image.pick(x, y);
+            total += 1;
+            on_scan += usize::from(cpu == Some(id));
+            agree += usize::from(mesh.pick(&cam, &[], x, y).map(|h| h.id) == cpu);
+        }
+    }
+    assert!(on_scan > 2000 && agree * 1000 >= total * 998, "{agree} of {total} agree; {on_scan} on the scan");
+    // Hidden, it's no part of the mesh.
     run(&mut s, "graphics", json!({"view": "{3D}", "hide_elements": [id]}));
-    assert!(gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).is_ok());
+    let mesh = gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).unwrap();
+    assert!(mesh.chosen(&cam).is_empty());
+    // Coloured by the view, its points take the view's colour.
+    run(&mut s, "graphics", json!({"view": "{3D}", "reset": true, "elements": {id.to_string(): {"projection": {"fill": [0, 0, 255]}}}}));
+    let mesh = gpu::Mesh::new(&Scene::new(&s.model), &Look::of_3d(&s.model)).unwrap();
+    let (scan, node) = mesh.chosen(&cam)[0];
+    assert!(mesh.node_points(scan, node).iter().all(|p| p.color == 0xff0000));
 }
 
 // ---------- plans and sections ----------

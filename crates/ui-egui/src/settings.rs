@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use egui::{Align, ComboBox, Context, Id as UiId, Layout, Modal, RichText, ScrollArea, ThemePreference, Ui, vec2};
 use serde_json::{Value, json};
 
+use bimcraft_core::view3d::DRAWN_RANGE;
+
 use crate::BimApp;
 use crate::dock::{Docking, Palette};
 use crate::lang::{Lang, t};
@@ -90,6 +92,8 @@ pub struct Settings {
     pub window: Window,
     /// What High Contrast Point Clouds fills a view's scans with.
     pub high_contrast: [u8; 3],
+    /// The most points a view draws among its scans (`view3d::drawn`), as Revit's point cloud density.
+    pub point_budget: usize,
     /// The system's title bar rather than the window's own, where the window can draw its own.
     pub system_title_bar: bool,
 }
@@ -112,6 +116,7 @@ impl Settings {
             "gpu_3d": self.gpu_3d,
             "window": self.window.to_json(),
             "high_contrast": self.high_contrast,
+            "point_budget": self.point_budget,
             "system_title_bar": self.system_title_bar,
         })
     }
@@ -140,6 +145,11 @@ impl Settings {
             gpu_3d: v["gpu_3d"].as_bool().unwrap_or(base.gpu_3d),
             window: Window::from_json(&v["window"], base.window),
             high_contrast: colour(&v["high_contrast"]).unwrap_or(base.high_contrast),
+            point_budget: v["point_budget"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|n| (DRAWN_RANGE.0..=DRAWN_RANGE.1).contains(n))
+                .unwrap_or(base.point_budget),
             system_title_bar: v["system_title_bar"].as_bool().unwrap_or(base.system_title_bar),
         }
     }
@@ -221,6 +231,8 @@ impl BimApp {
         self.card.wanted = kept.gpu_3d;
         self.window.kept = kept.window;
         self.scan_contrast = kept.high_contrast;
+        self.point_budget = kept.point_budget;
+        bimcraft_core::view3d::set_drawn(kept.point_budget);
         self.system_title_bar = kept.system_title_bar;
         self.settings_kept = Some(kept);
         self.settings_path = Some(path);
@@ -243,6 +255,7 @@ impl BimApp {
             gpu_3d: self.card.wanted,
             window: self.window.kept,
             high_contrast: self.scan_contrast,
+            point_budget: self.point_budget,
             system_title_bar: self.system_title_bar,
         }
     }
@@ -424,6 +437,22 @@ impl BimApp {
                 .on_hover_text(t("What High Contrast Point Clouds, on the view control bar, draws a view's scans in"));
             if ui.button(t("Reset Colour")).clicked() {
                 self.scan_contrast = crate::footer::HIGH_CONTRAST;
+            }
+        });
+        // In millions, as the slider shows it; every view draws to it from the next frame.
+        ui.horizontal(|ui| {
+            let l = ui.label(t("Points drawn (millions)"));
+            let mut millions = self.point_budget as f64 / 1e6;
+            let range = DRAWN_RANGE.0 as f64 / 1e6..=DRAWN_RANGE.1 as f64 / 1e6;
+            if ui
+                .add(egui::Slider::new(&mut millions, range).logarithmic(true).max_decimals(1))
+                .labelled_by(l.id)
+                .on_hover_text(t("The most points a view draws among its scans: the levels of detail it sees largest"))
+                .changed()
+            {
+                self.point_budget = ((millions * 10.0).round() * 100_000.0) as usize;
+                bimcraft_core::view3d::set_drawn(self.point_budget);
+                self.point_budget = bimcraft_core::view3d::drawn();
             }
         });
         later(ui, graphics_later);

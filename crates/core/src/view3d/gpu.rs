@@ -3,14 +3,16 @@
 //! shader never sees them), and a bounding volume hierarchy to pick through. No graphics API is in here, so the core stays free
 //! of one; the desktop's `gpu.rs` draws it. What a card can't draw (hidden line and wireframe) is refused with a reason, and
 //! the CPU picture is drawn instead. Surfaces seen through come after the opaque ones (from [`Mesh::clear_from`]), as the
-//! processor draws them in a pass of their own.
+//! processor draws them in a pass of their own. Scans are drawn by node, as the processor chooses them for a camera
+//! ([`Mesh::chosen`]), each node's points made for the card when it first needs them ([`Mesh::node_points`]).
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use super::{Camera, DATUM, EDGE, LevelMarks, P3, Scene, add, cross, dot, level_marks, mul, sub, unit};
+use super::{Camera, DATUM, DOT, EDGE, LevelMarks, P3, Scene, add, cross, dot, level_marks, mul, sub, unit};
+use crate::cloud::octree::select;
 use crate::geom::{self, P2};
-use crate::graphics::{Look, VisualStyle};
+use crate::graphics::{Look, Tone, VisualStyle};
 use crate::model::Id;
 use crate::render::Rgb;
 
@@ -37,6 +39,24 @@ pub struct Vertex {
     pub plane: u32,
     /// Its texture's place in [`Mesh::skins`], or 0 for none.
     pub tex: u32,
+}
+
+/// A point of a scan as the card draws it: a square [`DOT`] pixels wide, unlit, in front of what is farther.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointVertex {
+    /// From [`Mesh::origin`], in mm.
+    pub position: [f32; 3],
+    /// Red, green and blue in the low three bytes, as the view shows it.
+    pub color: u32,
+    /// One more than the place of its element in [`Mesh::owners`].
+    pub owner: u32,
+}
+
+/// A scan the mesh draws: where in [`Mesh::owners`] its element is, the scan as the scene places it, and how the view colours it.
+struct Placed {
+    owner: u32,
+    scan: super::Scan,
+    tone: Tone,
 }
 
 /// A texture as a card looks it up (see [`texture::Sampler::at`](crate::texture::Sampler::at)): the tile's size, turn as
@@ -120,6 +140,7 @@ pub struct Mesh {
     level_colors: BTreeMap<Id, Rgb>,
     tris: Vec<Tri>,
     bvh: OnceLock<Bvh>,
+    scans: Vec<Placed>,
 }
 
 fn bounds<'a>(points: impl Iterator<Item = &'a P3>) -> Option<(P3, P3)> {
@@ -139,9 +160,7 @@ impl Mesh {
             return Err("a section box, which only the processor cuts yet".into());
         }
         let plain = look.is_plain();
-        if scene.scans.iter().any(|s| plain || look.shows(s.owner)) {
-            return Err("a point cloud, which only the processor draws yet".into());
-        }
+        let scans: Vec<&super::Scan> = scene.scans.iter().filter(|s| plain || look.shows(s.owner)).collect();
         let shown: Vec<usize> = (0..scene.tris.len()).filter(|&i| plain || look.shows(scene.tris[i].owner)).collect();
         if shown.len() > MAX_TRIS {
             return Err(format!("{} triangles, more than the card is given", shown.len()));
@@ -155,7 +174,7 @@ impl Mesh {
         let textured = |t: &super::Tri| scene.skins.get(t.tex as usize).is_some_and(Option::is_some) && colour(t) == t.color;
         let levels: Vec<_> = scene.levels.iter().filter(|(id, ..)| plain || look.shows(*id)).cloned().collect();
         let corners = levels.iter().flat_map(|(.., c)| c.iter());
-        let points = shown.iter().flat_map(|&i| scene.tris[i].p.iter()).chain(corners);
+        let points = shown.iter().flat_map(|&i| scene.tris[i].p.iter()).chain(corners).chain(scans.iter().flat_map(|s| s.corners.iter()));
         let (lo, hi) = bounds(points).unwrap_or(([0.0; 3], [0.0; 3]));
         let origin = mul(add(lo, hi), 0.5);
         let radius = dot(sub(hi, lo), sub(hi, lo)).sqrt() * 0.5;
@@ -171,6 +190,7 @@ impl Mesh {
             levels,
             tris: Vec::with_capacity(shown.len()),
             bvh: OnceLock::new(),
+            scans: Vec::new(),
         };
         let mut owners: BTreeMap<Id, u32> = BTreeMap::new();
         for i in shown {
@@ -193,6 +213,15 @@ impl Mesh {
             }
             let face = scene.faces.get(i).copied().filter(|f| !f.is_empty()).unwrap_or("");
             mesh.tris.push(Tri { p: t.p, hit: Hit { id: t.owner, face }, clear: clear(i) });
+        }
+        // The scans, after the triangles as the processor draws them: points have no edge of their own, so theirs is the default.
+        for scan in scans {
+            let owner = *owners.entry(scan.owner).or_insert_with(|| {
+                mesh.owners.push(Owner { id: scan.owner, edge: look.edge(scan.owner, EDGE), transparency: 0 });
+                mesh.owners.len() as u32
+            });
+            let tone = if plain { Tone::default() } else { look.tone(scan.owner) };
+            mesh.scans.push(Placed { owner, scan: scan.clone(), tone });
         }
         let used: std::collections::BTreeSet<u32> = mesh.vertices.iter().map(|v| v.tex).filter(|t| *t > 0).collect();
         for id in used {
@@ -233,6 +262,64 @@ impl Mesh {
                 [f(s.size[0]), f(s.size[1]), f(s.turn[0]), f(s.turn[1]), f(s.offset[0]), f(s.offset[1]), 0, 0, start, w, h, 0]
             })
             .collect()
+    }
+
+    /// The nodes of its scans a picture through `cam` draws, as the processor's picture chooses them: each scan's place in the
+    /// mesh, and the node's in its cloud's tree.
+    pub fn chosen(&self, cam: &Camera) -> Vec<(usize, usize)> {
+        let trees: Vec<_> = self.scans.iter().map(|p| p.scan.cloud.tree()).collect();
+        let size = (cam.width.clamp(1, super::MAX_SIDE) as usize, cam.height.clamp(1, super::MAX_SIDE) as usize);
+        let chosen = select(&trees, super::drawn(), |t, node| self.scans.get(t)?.scan.seen(node, cam, None, None, size));
+        chosen.into_iter().enumerate().flat_map(|(t, nodes)| nodes.into_iter().map(move |n| (t, n))).collect()
+    }
+
+    /// Node `node` of the mesh's scan `scan` as the card draws it: none for a node it doesn't have.
+    pub fn node_points(&self, scan: usize, node: usize) -> Vec<PointVertex> {
+        let Some(p) = self.scans.get(scan) else { return Vec::new() };
+        let (cloud, grey) = (&p.scan.cloud, Rgb(crate::cloud::GREY, crate::cloud::GREY, crate::cloud::GREY));
+        let (points, colours) = (cloud.points(), cloud.colours());
+        let word = |Rgb(r, g, b): Rgb| u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16;
+        cloud
+            .tree()
+            .points_of(node)
+            .iter()
+            .filter_map(|&i| {
+                let at = p.scan.place(*points.get(i as usize)?);
+                let base = colours.and_then(|c| c.get(i as usize)).map_or(grey, |c| Rgb(c[0], c[1], c[2]));
+                Some(PointVertex { position: sub(at, self.origin).map(|v| v as f32), color: word(p.tone.of(base)), owner: p.owner })
+            })
+            .collect()
+    }
+
+    /// The nearest point of a scan drawn over the pixel whose centre is `(x, y)`, as the processor draws one: a square [`DOT`]
+    /// pixels wide about it; the first drawn of points as near.
+    fn nearest_point(&self, cam: &Camera, (x, y): (f64, f64)) -> Found {
+        let (px, py, wide, half) = (x.floor(), y.floor(), DOT as f64, DOT as f64 / 2.0);
+        let mut best: Option<(f32, usize)> = None;
+        for (s, n) in self.chosen(cam) {
+            let Some(p) = self.scans.get(s) else { continue };
+            let tree = p.scan.cloud.tree();
+            let Some(node) = tree.nodes().get(n) else { continue };
+            // Only a node whose picture reaches the pixel.
+            let corners = node.corners().map(|c| cam.project(p.scan.place_mm(c)));
+            let (lo, hi) = corners.iter().fold(((f64::MAX, f64::MAX), (f64::MIN, f64::MIN)), |(lo, hi), c| {
+                ((lo.0.min(c.0), lo.1.min(c.1)), (hi.0.max(c.0), hi.1.max(c.1)))
+            });
+            if px + 1.0 < lo.0 - wide || px > hi.0 + wide || py + 1.0 < lo.1 - wide || py > hi.1 + wide {
+                continue;
+            }
+            let points = p.scan.cloud.points();
+            for &i in tree.points_of(n) {
+                let Some(q) = points.get(i as usize) else { continue };
+                let (qx, qy, qz) = cam.project(p.scan.place(*q));
+                let (x0, y0) = ((qx - half).round(), (qy - half).round());
+                let z = qz as f32;
+                if x0 <= px && px < x0 + wide && y0 <= py && py < y0 + wide && best.is_none_or(|(d, _)| z > d) {
+                    best = Some((z, s));
+                }
+            }
+        }
+        best.and_then(|(z, s)| Some((z, Hit { id: self.scans.get(s)?.scan.owner, face: "" })))
     }
 
     /// How a card draws the mesh through `cam`.
@@ -279,6 +366,11 @@ impl Mesh {
         }
         let centre = (x.floor() + 0.5, y.floor() + 0.5);
         let (opaque, clear) = self.nearest(cam, centre);
+        // A point drawn nearer than the opaque surface there hides it, as the processor draws points after the surfaces.
+        let opaque = match (opaque, self.nearest_point(cam, centre)) {
+            (o, Some((z, hit))) if o.is_none_or(|(d, _)| z > d) => Some((z, hit)),
+            (o, _) => o,
+        };
         // A level's mark is hidden by what is opaque only, as the processor's are.
         let behind = opaque.map_or(f64::NEG_INFINITY, |(z, _)| f64::from(z));
         let slack = 1.5 / cam.scale.max(1e-9);

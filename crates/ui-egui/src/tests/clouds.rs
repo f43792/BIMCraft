@@ -417,3 +417,30 @@ fn a_scan_with_a_colour_of_its_own_keeps_it_and_the_buttons_tip_says_so() {
     let said = painted_text(&h).into_iter().find(|t| t.starts_with("High Contrast Point Clouds:")).unwrap_or_default();
     assert!(said.contains("a colour of its own in Visibility/Graphics keeps it"), "{said:?}");
 }
+
+#[test]
+fn the_points_a_view_draws_are_the_users_kept_in_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("settings.json");
+    std::fs::write(&file, json!({"point_budget": 500_000}).to_string()).unwrap();
+    let mut h = app("");
+    h.state_mut().use_settings(file.clone());
+    assert_eq!(h.state().point_budget, 500_000);
+    press(&mut h, "Settings");
+    h.state_mut().settings_page = Some(crate::settings::Page::Graphics);
+    h.run();
+    assert!(h.query_by_label("Points drawn (millions)").is_some());
+    // Changed, it's kept.
+    h.state_mut().point_budget = 4_000_000;
+    press(&mut h, "Close");
+    let kept: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(kept["point_budget"], json!(4_000_000));
+    // What isn't a budget a view may draw keeps the default.
+    for bad in [r#"{"point_budget": 10}"#, r#"{"point_budget": 900000000}"#, r#"{"point_budget": "lots"}"#] {
+        std::fs::write(&file, bad).unwrap();
+        let mut fresh = app("");
+        fresh.state_mut().use_settings(file.clone());
+        assert_eq!(fresh.state().point_budget, bimcraft_core::view3d::DRAWN, "{bad}");
+    }
+    bimcraft_core::view3d::set_drawn(bimcraft_core::view3d::DRAWN);
+}

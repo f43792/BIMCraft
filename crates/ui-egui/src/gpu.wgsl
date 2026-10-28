@@ -6,6 +6,8 @@
 //   3. vs_full / fs_post: an edge wherever the opaque plane changes between a pixel and the one to its right or below it, else
 //      the shaded colour (tinted halfway where selected), else the ground; and over it what is seen through, blended.
 //   4. vs_line / fs_line: each level's plane and name as lines, where nothing opaque nearer hides them.
+// In the first pass, after the surfaces, vs_point / fs_point draw the scans' points: each a square, unlit, its pixels marked as
+// a point's so that no edge is drawn round it.
 // Lengths are mm. A colour is 0 to 255 in each channel, as the processor keeps it, and is divided down only on its way out.
 
 struct Globals {
@@ -18,7 +20,7 @@ struct Globals {
     aim: vec4<f32>,
     // xyz: the mesh's origin in the model, which a texture is laid by.
     origin: vec4<f32>,
-    // rgb: the ground the surfaces stand on.
+    // rgb: the ground the surfaces stand on. w: how many px wide a scan's point is drawn.
     ground: vec4<f32>,
     // xy: the picture's size, px. z: how much nearer a surface may be than a line and still leave it showing, in depth.
     // w: 1 where the view sees through something.
@@ -186,6 +188,52 @@ fn fs_clear(in: SceneOut, @builtin(front_facing) front: bool) -> ClearTargets {
     return out;
 }
 
+// The plane a point's pixels hold: no surface's.
+const POINT: u32 = 0xffffffffu;
+
+struct PointIn {
+    @location(0) position: vec3<f32>,
+    @location(1) color: u32,
+    @location(2) owner: u32,
+}
+
+struct PointOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) @interpolate(flat) base: vec3<f32>,
+    @location(1) @interpolate(flat) owner: u32,
+}
+
+// Rounded half away from nought, as the processor rounds.
+fn away(v: vec2<f32>) -> vec2<f32> {
+    return sign(v) * floor(abs(v) + vec2<f32>(0.5));
+}
+
+// A point as the processor draws it: a square `g.ground.w` px wide, its corner on the whole pixel nearest to half its width
+// up and left of where it lies, at its depth.
+@vertex
+fn vs_point(@builtin(vertex_index) i: u32, v: PointIn) -> PointOut {
+    let p = to_pixel(v.position);
+    let wide = g.ground.w;
+    let corner = away(p.xy - vec2<f32>(wide * 0.5));
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+    );
+    let xy = corner + corners[i] * wide;
+    var o: PointOut;
+    o.clip = vec4<f32>(xy.x / g.size.x * 2.0 - 1.0, 1.0 - xy.y / g.size.y * 2.0, p.z, 1.0);
+    o.base = vec3<f32>(f32(v.color & 255u), f32((v.color >> 8u) & 255u), f32((v.color >> 16u) & 255u));
+    o.owner = v.owner;
+    return o;
+}
+
+@fragment
+fn fs_point(in: PointOut) -> SceneTargets {
+    var out: SceneTargets;
+    out.color = vec4<f32>(in.base / 255.0, 1.0);
+    out.ids = vec2<u32>(POINT, in.owner);
+    return out;
+}
+
 @vertex
 fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
@@ -213,7 +261,8 @@ fn fs_post(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let here = ids_at(x, y);
     let right = ids_at(x + 1, y);
     let below = ids_at(x, y + 1);
-    let edge = (x + 1 < size.x && right.x != here.x) || (y + 1 < size.y && below.x != here.x);
+    // A surface's edge is where it meets another surface or nothing; a point is not one.
+    let edge = here.x != POINT && ((x + 1 < size.x && right.x != POINT && right.x != here.x) || (y + 1 < size.y && below.x != POINT && below.x != here.x));
     var rgb = g.ground.xyz;
     if edge {
         // In the tint where the pixel's own element is tinted, else in the edge colour of the first element of it, the pixel
@@ -223,9 +272,9 @@ fn fs_post(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
             color = owners[here.y - 1u].tint.xyz;
         } else if here.y != 0u {
             color = owners[here.y - 1u].edge.xyz;
-        } else if right.y != 0u {
+        } else if right.y != 0u && right.x != POINT {
             color = owners[right.y - 1u].edge.xyz;
-        } else if below.y != 0u {
+        } else if below.y != 0u && below.x != POINT {
             color = owners[below.y - 1u].edge.xyz;
         }
         rgb = color;
